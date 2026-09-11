@@ -146,3 +146,191 @@ def render_heatmap(grid, wacc_values, terminal_values, current_price) -> str:
       <div class="hm-legend">{legend_swatches}</div>
     </div>
     """
+
+
+# --- projection chart -------------------------------------------------------
+# Categorical slots 1-3 from the reference palette, in fixed order. Validated in
+# both themes (worst all-pairs CVD dE 9.2 light / 9.4 dark, clear of the >=8 target).
+# Light-mode aqua sits at 2.74:1 against the surface, below the 3:1 bar, so the
+# relief rule applies: every line carries a visible direct endpoint label.
+SERIES = [
+    {"key": "revenue", "label": "Revenue", "light": "#2a78d6", "dark": "#3987e5"},
+    {"key": "fcf", "label": "Free cash flow", "light": "#eb6834", "dark": "#d95926"},
+    {"key": "pv", "label": "PV of FCF", "light": "#1baf7a", "dark": "#199e70"},
+]
+
+# Plot geometry, in SVG user units. The viewBox scales to the container.
+_W, _H = 720, 340
+_PAD = {"l": 54, "r": 96, "t": 16, "b": 34}
+
+
+def _nice_ceiling(value: float) -> tuple[float, float]:
+    """Round an axis maximum up to a readable step. Returns (maximum, step)."""
+    if value <= 0:
+        return 1.0, 0.25
+    import math
+
+    rough = value / 4                      # aim for about four gridlines
+    magnitude = 10 ** math.floor(math.log10(rough))
+    for multiple in (1, 2, 2.5, 5, 10):
+        step = multiple * magnitude
+        if step >= rough:
+            break
+    return math.ceil(value / step) * step, step
+
+
+#: Minimum vertical gap between stacked endpoint labels, in SVG user units.
+#: The label font is 11px, so anything tighter than this overlaps.
+LABEL_GAP = 13.0
+
+
+def _decollide(ys: list[float], floor_y: float, ceiling_y: float) -> list[float]:
+    """Spread label positions so no two sit closer than LABEL_GAP.
+
+    Walks the labels in vertical order pushing each below the previous one, then
+    slides the whole run back up if it overshot the plot, and clamps into range.
+    Returns positions in the original series order.
+    """
+    order = sorted(range(len(ys)), key=lambda i: ys[i])
+    placed = [ys[i] for i in order]
+
+    # Forward: push each label below its predecessor, keeping it inside the plot.
+    for k in range(len(placed)):
+        lower_bound = floor_y if k == 0 else placed[k - 1] + LABEL_GAP
+        placed[k] = max(placed[k], lower_bound)
+
+    # Backward: pull anything that overshot the bottom back up. Done as a second
+    # pass rather than shifting the whole run, so a label that was never crowded
+    # is not dragged along by one that was.
+    for k in range(len(placed) - 1, -1, -1):
+        upper_bound = ceiling_y if k == len(placed) - 1 else placed[k + 1] - LABEL_GAP
+        placed[k] = min(placed[k], upper_bound)
+
+    out = [0.0] * len(ys)
+    for slot, i in enumerate(order):
+        out[i] = placed[slot]
+    return out
+
+
+def render_projection_chart(r) -> str:
+    """Three-line forecast chart: revenue, free cash flow, and its present value.
+
+    All three are $B on one shared axis -- same unit, so no second scale is
+    needed and the dual-axis trap does not arise.
+    """
+    values = {
+        "revenue": [row.revenue for row in r.rows],
+        "fcf": [row.free_cash_flow for row in r.rows],
+        "pv": [row.pv_of_fcf for row in r.rows],
+    }
+    years = [row.year for row in r.rows]
+    n = len(years)
+
+    y_max, step = _nice_ceiling(max(values["revenue"]))
+    plot_w = _W - _PAD["l"] - _PAD["r"]
+    plot_h = _H - _PAD["t"] - _PAD["b"]
+
+    def x_at(i: int) -> float:
+        return _PAD["l"] + (plot_w * i / (n - 1) if n > 1 else plot_w / 2)
+
+    def y_at(v: float) -> float:
+        return _PAD["t"] + plot_h * (1 - v / y_max)
+
+    # Gridlines and y labels -- hairline, solid, recessive.
+    grid, ticks = "", []
+    level = 0.0
+    while level <= y_max + 1e-9:
+        y = y_at(level)
+        grid += f'<line class="c-grid" x1="{_PAD["l"]}" y1="{y:.1f}" x2="{_PAD["l"] + plot_w}" y2="{y:.1f}"/>'
+        ticks.append(f'<text class="c-tick c-tick-y" x="{_PAD["l"] - 8}" y="{y + 3.5:.1f}">{level:,.0f}</text>')
+        level += step
+
+    # X ticks: every year when there is room, otherwise every other one.
+    every = 1 if n <= 12 else 2
+    for i, year in enumerate(years):
+        if i % every == 0 or i == n - 1:
+            ticks.append(
+                f'<text class="c-tick" x="{x_at(i):.1f}" y="{_PAD["t"] + plot_h + 18}">{year}</text>'
+            )
+
+    # Endpoint labels are the relief for light-mode aqua sitting below 3:1 contrast,
+    # so they have to stay readable at every setting -- not just the default one.
+    # Where the three series converge (a short horizon at a low WACC will stack them
+    # within a pixel of each other) push the labels apart to a legible gap. The marker
+    # stays on the true value; only the text moves.
+    label_y = _decollide(
+        [y_at(values[spec["key"]][-1]) for spec in SERIES],
+        floor_y=_PAD["t"] + 4,
+        ceiling_y=_PAD["t"] + plot_h - 4,
+    )
+
+    lines, markers, end_labels = "", "", ""
+    for slot, spec in enumerate(SERIES):
+        pts = " ".join(f"{x_at(i):.1f},{y_at(v):.1f}" for i, v in enumerate(values[spec["key"]]))
+        lines += (
+            f'<polyline class="c-line" data-series="{spec["key"]}" points="{pts}" '
+            f'style="--c-l:{spec["light"]};--c-d:{spec["dark"]}"/>'
+        )
+        last_x, last_v = x_at(n - 1), values[spec["key"]][-1]
+        markers += (
+            f'<circle class="c-end" cx="{last_x:.1f}" cy="{y_at(last_v):.1f}" r="4" '
+            f'style="--c-l:{spec["light"]};--c-d:{spec["dark"]}"/>'
+        )
+        end_labels += (
+            f'<text class="c-end-label" x="{last_x + 10:.1f}" y="{label_y[slot] + 3.5:.1f}">'
+            f'{spec["label"]} ${last_v:,.0f}B</text>'
+        )
+
+    # Hover layer: one transparent full-height band per year. Pure CSS -- no script,
+    # which Gradio might not execute anyway.
+    band_w = plot_w / max(n - 1, 1)
+    bands = ""
+    for i, year in enumerate(years):
+        cx = x_at(i)
+        rows_html = "".join(
+            f'<tspan class="c-tip-row" x="0" dy="{14 if j else 0}">'
+            f'{spec["label"]}  ${values[spec["key"]][i]:,.1f}B</tspan>'
+            for j, spec in enumerate(SERIES)
+        )
+        # Flip the tooltip to the left half-way across, so it never runs off the edge.
+        flip = i > n / 2
+        tip_x = cx - 132 if flip else cx + 10
+        bands += (
+            f'<g class="c-band">'
+            f'<rect class="c-hit" x="{cx - band_w / 2:.1f}" y="{_PAD["t"]}" '
+            f'width="{band_w:.1f}" height="{plot_h:.1f}"/>'
+            f'<g class="c-hover">'
+            f'<line class="c-cross" x1="{cx:.1f}" y1="{_PAD["t"]}" x2="{cx:.1f}" '
+            f'y2="{_PAD["t"] + plot_h:.1f}"/>'
+            + "".join(
+                f'<circle class="c-dot" cx="{cx:.1f}" cy="{y_at(values[s["key"]][i]):.1f}" r="4" '
+                f'style="--c-l:{s["light"]};--c-d:{s["dark"]}"/>'
+                for s in SERIES
+            )
+            + f'<g transform="translate({tip_x:.1f},{_PAD["t"] + 16})">'
+            f'<rect class="c-tip-bg" x="-8" y="-14" width="128" height="62" rx="6"/>'
+            f'<text class="c-tip"><tspan class="c-tip-year" x="0" dy="0">Year {year}</tspan>'
+            f'<tspan x="0" dy="16"> </tspan>{rows_html}</text></g>'
+            f'</g></g>'
+        )
+
+    legend = "".join(
+        f'<span class="c-key"><span class="c-key-line" '
+        f'style="--c-l:{s["light"]};--c-d:{s["dark"]}"></span>{s["label"]}</span>'
+        for s in SERIES
+    )
+
+    return f"""
+    <div class="chart-wrap">
+      <div class="c-legend">{legend}</div>
+      <svg class="chart" viewBox="0 0 {_W} {_H}" role="img"
+           aria-label="Revenue, free cash flow and present value of free cash flow by forecast year">
+        {grid}
+        <line class="c-axis" x1="{_PAD["l"]}" y1="{_PAD["t"] + plot_h}" x2="{_PAD["l"] + plot_w}" y2="{_PAD["t"] + plot_h}"/>
+        {"".join(ticks)}
+        {lines}{markers}{end_labels}
+        {bands}
+      </svg>
+      <p class="c-note">All figures $B. Hover any year for the full read-out.</p>
+    </div>
+    """

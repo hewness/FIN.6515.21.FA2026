@@ -24,7 +24,7 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-34 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+49 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -38,15 +38,23 @@ would leave an app that still runs and still prints a plausible number:
 - **A table that disagrees with the engine.** The projection table's rendered cells are
   parsed back out of the HTML and compared, exactly, against a direct `run_dcf()` call.
 
+`test_viz.py` does the same for the chart, which is harder to check than a table because
+it renders and looks plausible whatever it draws. The tests invert the plotted SVG
+coordinates back into dollars and reconcile them against the model, pin the series colors
+to their documented palette slots, and sweep 500 slider combinations asserting the
+endpoint labels never collide — a bug that sweep actually caught, and the closest
+substitute available for looking at the thing.
+
 ## Layout
 
 | File | Contains |
 |---|---|
 | `dcf.py` | The valuation math. Pure functions, no UI imports, independently testable. |
-| `viz.py` | Diverging color scale (computed in OKLab) and the heatmap renderer. |
-| `app.py` | Gradio UI — sliders, the valuation panel, and the two tabs. |
+| `viz.py` | Color scales (computed in OKLab), the heatmap, and the projection chart. |
+| `app.py` | Gradio UI — sliders, the result panels, and the three tabs. |
 | `test_dcf.py` | Valuation math tests. |
 | `test_app_wiring.py` | Guards on the UI-to-model binding. |
+| `test_viz.py` | Guards on the chart's geometry, palette and labels. |
 
 ## Controls
 
@@ -96,8 +104,17 @@ operating margin, EBIT, NOPAT, free cash flow, discount factor and present value
 every projected year — and then the equity bridge from enterprise value down to intrinsic
 value per share. Beneath the table the Gordon Growth arithmetic is printed with the
 current scenario's own numbers, so the terminal value can be checked rather than taken on
-trust. The
-**Sensitivity** tab revalues the company across a grid of WACC (8–14%) and terminal
+trust.
+
+The **Projection** tab plots revenue, free cash flow and the present value of free cash
+flow against the forecast years — three lines on one shared axis, since all three are in
+$B. Hovering any year gives a crosshair and a read-out of all three series. The third
+line is the one worth watching: free cash flow climbs every year, but its present value
+**peaks mid-forecast and then falls**, because past that point discounting outruns
+growth. That is the mechanism behind terminal value dominating the valuation, and it is
+invisible in the table.
+
+The **Sensitivity** tab revalues the company across a grid of WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.
 

@@ -3,7 +3,7 @@
 import gradio as gr
 
 from dcf import NVDA_DEFAULTS, run_dcf, sensitivity_grid
-from viz import render_heatmap
+from viz import render_heatmap, render_projection_chart
 
 # Upside thresholds that separate the three signals.
 BUY_ABOVE = 0.15
@@ -62,6 +62,50 @@ CSS = """
 .proj tfoot td:first-child { text-align: right; opacity: 1; font-weight: 550; }
 .proj-note { font-size: 0.78rem; color: var(--body-text-color-subdued);
              margin: 10px 0 0; line-height: 1.5; }
+
+/* --- projection chart --- */
+.chart-wrap { margin-top: 4px; }
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.c-legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 4px 0 12px; }
+.c-key { display: inline-flex; align-items: center; gap: 7px; font-size: 0.8rem;
+         color: var(--body-text-color-subdued); }
+.c-key-line { display: inline-block; width: 18px; height: 2px; border-radius: 1px;
+              background: var(--c-l); }
+.c-grid, .c-axis { stroke: var(--border-color-primary); stroke-width: 1; fill: none; }
+.c-axis { stroke-opacity: .9; }
+.c-tick { font-size: 11px; fill: var(--body-text-color-subdued); text-anchor: middle;
+          font-variant-numeric: tabular-nums; }
+.c-tick-y { text-anchor: end; }
+.c-line { fill: none; stroke: var(--c-l); stroke-width: 2;
+          stroke-linejoin: round; stroke-linecap: round; }
+/* 2px ring in the surface colour so markers stay legible where lines cross */
+.c-end, .c-dot { fill: var(--c-l); stroke: var(--background-fill-primary); stroke-width: 2; }
+.c-end-label { font-size: 11px; fill: var(--body-text-color); font-weight: 550;
+               font-variant-numeric: tabular-nums; }
+.c-note { font-size: 0.78rem; color: var(--body-text-color-subdued); margin: 8px 0 0; }
+
+/* hover layer: transparent per-year bands drive a CSS-only crosshair */
+.c-hit { fill: transparent; }
+.c-hover { opacity: 0; pointer-events: none; }
+.c-band:hover .c-hover, .c-band:focus-within .c-hover { opacity: 1; }
+.c-cross { stroke: var(--body-text-color-subdued); stroke-width: 1; stroke-opacity: .55; }
+.c-tip-bg { fill: var(--background-fill-secondary); stroke: var(--border-color-primary);
+            stroke-width: 1; }
+.c-tip { font-size: 11px; fill: var(--body-text-color); font-variant-numeric: tabular-nums; }
+.c-tip-year { font-weight: 650; }
+.c-tip-row { fill: var(--body-text-color); }
+
+@media (prefers-color-scheme: dark) {
+  .c-key-line { background: var(--c-d); }
+  .c-line { stroke: var(--c-d); }
+  .c-end, .c-dot { fill: var(--c-d); }
+}
+.dark .c-key-line { background: var(--c-d); }
+.dark .c-line { stroke: var(--c-d); }
+.dark .c-end, .dark .c-dot { fill: var(--c-d); }
+html:not(.dark) .c-key-line { background: var(--c-l); }
+html:not(.dark) .c-line { stroke: var(--c-l); }
+html:not(.dark) .c-end, html:not(.dark) .c-dot { fill: var(--c-l); }
 
 /* --- sensitivity heatmap --- */
 .hm-scroll { overflow-x: auto; }
@@ -195,10 +239,9 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
     try:
         r = run_dcf(wacc=wacc / 100, terminal_growth=terminal_growth / 100, **shared)
     except ValueError as exc:
-        return (
-            f'<div class="warn"><strong>Cannot value this scenario.</strong><br>{exc}</div>',
-            heat,
-        )
+        # Every panel gets the warning -- never a half-drawn chart or table.
+        warning = f'<div class="warn"><strong>Cannot value this scenario.</strong><br>{exc}</div>'
+        return warning, warning, heat
 
     signal = signal_for(r.upside)
     color, bg = SIGNAL_COLORS[signal]
@@ -233,6 +276,7 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
     </table>
     """
     return (f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
+            render_projection_chart(r),
             heat)
 
 
@@ -288,6 +332,14 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
             with gr.Tabs():
                 with gr.Tab("Valuation"):
                     results = gr.HTML()
+                with gr.Tab("Projection"):
+                    chart = gr.HTML()
+                    gr.Markdown(
+                        "Free cash flow climbs every year, but its **present value** "
+                        "peaks mid-forecast and then falls: past that point discounting "
+                        "outruns growth. That is why so much of the valuation ends up "
+                        "in the terminal value rather than the years you projected."
+                    )
                 with gr.Tab("Sensitivity"):
                     heatmap = gr.HTML()
                     gr.Markdown(
@@ -333,7 +385,7 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         triggers=[c.change for c in all_inputs] + [demo.load],
         fn=valuate,
         inputs=all_inputs,
-        outputs=[results, heatmap],
+        outputs=[results, chart, heatmap],
     )
 
     def switch_mode(selected):

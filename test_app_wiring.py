@@ -56,16 +56,25 @@ def test_per_year_defaults_reproduce_the_taper():
     assert app.MARGIN_BY_YEAR == taper_margin
 
 
-def test_both_modes_render_the_same_panel_at_defaults():
+def test_valuate_feeds_all_three_panels():
     defaults = [c.value for c in app.all_inputs]
-    taper_panel, taper_heat = app.valuate(*defaults)
+    panels = app.valuate(*defaults)
+    assert len(panels) == 3
+    valuation, chart, heat = panels
+    assert "<table class=\"proj\"" in valuation
+    assert "<svg" in chart
+    assert "hm-cell" in heat
+
+
+def test_both_modes_render_the_same_panels_at_defaults():
+    defaults = [c.value for c in app.all_inputs]
+    taper = app.valuate(*defaults)
 
     per_year = list(defaults)
     per_year[0] = app.PER_YEAR
-    py_panel, py_heat = app.valuate(*per_year)
+    py = app.valuate(*per_year)
 
-    assert taper_panel == py_panel
-    assert taper_heat == py_heat
+    assert taper == py          # valuation, chart and heatmap all identical
 
 
 def test_signal_thresholds():
@@ -136,9 +145,17 @@ def test_terminal_and_net_debt_rows_are_present():
     assert "($34.7B)" in panel
 
 
-def test_guardrail_renders_a_warning_not_a_half_built_table():
-    panel = _panel(**{"WACC (%)": 4.0, "Terminal growth (%)": 5.0})
-    assert "Cannot value this scenario" in panel
-    assert "<tbody>" not in panel
+def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
+    bad = {"WACC (%)": 4.0, "Terminal growth (%)": 5.0}
+    values = [c.value for c in app.all_inputs]
+    labels = [c.label for c in app.all_inputs]
+    for label, value in bad.items():
+        values[labels.index(label)] = value
+    valuation, chart, _ = app.valuate(*values)
+
+    assert "Cannot value this scenario" in valuation
+    assert "<tbody>" not in valuation          # no half-built table
+    assert "Cannot value this scenario" in chart
+    assert "<svg" not in chart                 # no half-drawn chart
 
 
