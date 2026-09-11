@@ -44,6 +44,25 @@ CSS = """
 .warn { border: 1px solid #dc2626; background: rgba(220,38,38,0.08);
         border-radius: 10px; padding: 16px; }
 
+/* --- year-by-year projection --- */
+.proj { width: 100%; border-collapse: collapse; font-size: 0.82rem;
+        font-variant-numeric: tabular-nums; }
+.proj caption { caption-side: top; text-align: left; font-size: 0.78rem;
+                text-transform: uppercase; letter-spacing: .06em; opacity: .65;
+                padding: 16px 0 8px; }
+.proj th { font-weight: 550; font-size: 0.72rem; text-align: right;
+           color: var(--body-text-color-subdued); padding: 4px 8px;
+           border-bottom: 1px solid var(--border-color-primary); white-space: nowrap; }
+.proj th:first-child { text-align: left; }
+.proj td { text-align: right; padding: 5px 8px; white-space: nowrap;
+           border-bottom: 1px solid var(--border-color-primary); }
+.proj td:first-child { text-align: left; opacity: .7; }
+.proj tbody tr:last-child td { border-bottom: 2px solid var(--border-color-primary); }
+.proj tfoot td { font-weight: 650; border-bottom: none; padding-top: 8px; }
+.proj tfoot td:first-child { text-align: right; opacity: 1; font-weight: 550; }
+.proj-note { font-size: 0.78rem; color: var(--body-text-color-subdued);
+             margin: 10px 0 0; line-height: 1.5; }
+
 /* --- sensitivity heatmap --- */
 .hm-scroll { overflow-x: auto; }
 .hm { border-collapse: separate; border-spacing: 2px; width: 100%; }
@@ -95,20 +114,60 @@ def _kpi(label: str, value: str, sub: str = "", color: str = "", bg: str = "") -
     )
 
 
-def _year_one_build(row) -> str:
-    """Show how the first year's cash flow is assembled from the new drivers."""
+def _signed_b(value: float) -> str:
+    """Accounting style: negatives in parentheses, as a finance reader expects."""
+    if value < 0:
+        return f"(${abs(value):,.1f}B)"
+    return f"${value:,.1f}B"
+
+
+def _projection_table(r) -> str:
+    """Year-by-year forecast: revenue through to each year's present value.
+
+    The gap between NOPAT and free cash flow is net capex plus the change in
+    working capital, both set on the Cash flow sliders.
+    """
+    body = "".join(
+        f"<tr><td>{row.year}</td>"
+        f"<td>{row.growth_rate:+.1%}</td>"
+        f"<td>${row.revenue:,.1f}</td>"
+        f"<td>{row.operating_margin:.1%}</td>"
+        f"<td>${row.operating_income:,.1f}</td>"
+        f"<td>${row.nopat:,.1f}</td>"
+        f"<td>${row.free_cash_flow:,.1f}</td>"
+        f"<td>{row.discount_factor:.3f}</td>"
+        f"<td>${row.pv_of_fcf:,.1f}</td></tr>"
+        for row in r.rows
+    )
+
+    final = r.rows[-1]
+    # Spell the Gordon Growth arithmetic out with this scenario's own numbers, so
+    # the terminal value is checkable on screen rather than taken on trust.
+    formula = (
+        f"<strong>Gordon Growth:</strong> terminal value = "
+        f"${final.free_cash_flow:,.1f}B &times; {1 + r.terminal_growth:.3f} &divide; "
+        f"({r.wacc:.3f} &minus; {r.terminal_growth:.3f}) = ${r.terminal_value:,.0f}B, "
+        f"discounted at {final.discount_factor:.3f} to ${r.pv_of_terminal:,.0f}B today."
+    )
+
     return f"""
-    <table class="bridge">
-      <caption>Year 1 cash flow build</caption>
-      <tr><td>Revenue ({row.growth_rate:+.1%} growth)</td><td>${row.revenue:,.1f}B</td></tr>
-      <tr><td>&times; Operating margin {row.operating_margin:.1%}</td>
-          <td>${row.operating_income:,.1f}B</td></tr>
-      <tr><td>&minus; Tax</td><td>${row.operating_income - row.nopat:,.1f}B</td></tr>
-      <tr><td>= NOPAT</td><td>${row.nopat:,.1f}B</td></tr>
-      <tr><td>&minus; Net capex</td><td>${row.net_capex:,.1f}B</td></tr>
-      <tr><td>&minus; Working capital</td><td>${row.change_in_nwc:,.1f}B</td></tr>
-      <tr class="total"><td>Free cash flow</td><td>${row.free_cash_flow:,.1f}B</td></tr>
-    </table>
+    <div class="hm-scroll">
+      <table class="proj">
+        <caption>Forecast &mdash; all figures $B except per-year rates</caption>
+        <thead><tr>
+          <th>Yr</th><th>Growth</th><th>Revenue</th><th>Op margin</th><th>EBIT</th>
+          <th>NOPAT</th><th>FCF</th><th>Disc. factor</th><th>PV of FCF</th>
+        </tr></thead>
+        <tbody>{body}</tbody>
+        <tfoot>
+          <tr class="subtotal"><td colspan="8">PV of forecast cash flows</td>
+              <td>${r.pv_of_forecast:,.1f}</td></tr>
+          <tr class="terminal"><td colspan="8">Terminal value (Gordon Growth), discounted</td>
+              <td>${r.pv_of_terminal:,.1f}</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <p class="proj-note">{formula}</p>
     """
 
 
@@ -166,12 +225,14 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
       <tr><td>Enterprise value</td><td>${r.enterprise_value:,.0f}B</td></tr>
       <tr><td>+ Cash</td><td>${r.cash:,.1f}B</td></tr>
       <tr><td>&minus; Debt</td><td>${r.debt:,.1f}B</td></tr>
+      <tr><td>= Net debt{" (net cash)" if r.net_debt < 0 else ""}</td>
+          <td>{_signed_b(r.net_debt)}</td></tr>
       <tr><td>Equity value</td><td>${r.equity_value:,.0f}B</td></tr>
       <tr><td>&divide; Shares outstanding</td><td>{r.shares:,.1f}B</td></tr>
       <tr class="total"><td>Intrinsic value per share</td><td>${r.value_per_share:,.2f}</td></tr>
     </table>
     """
-    return (f'<div class="kpi-grid">{kpis}</div>{_year_one_build(r.rows[0])}{bridge}',
+    return (f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
             heat)
 
 

@@ -134,6 +134,51 @@ def test_the_two_modes_are_the_same_model():
     )
 
 
+# --- the discounting chain, end to end ---
+
+def test_terminal_value_is_gordon_growth():
+    """TV = final-year FCF x (1 + g) / (WACC - g), recomputed independently here.
+
+    Pinned deliberately: this formula is the single largest contributor to the
+    valuation, and a refactor that quietly changed it would still produce a
+    plausible-looking number.
+    """
+    for wacc, g in [(0.10, 0.03), (0.08, 0.01), (0.14, 0.045)]:
+        r = run_dcf(wacc=wacc, terminal_growth=g)
+        expected = r.rows[-1].free_cash_flow * (1 + g) / (wacc - g)
+        assert r.terminal_value == pytest.approx(expected)
+        assert r.wacc == pytest.approx(wacc)
+        assert r.terminal_growth == pytest.approx(g)
+
+
+def test_every_year_is_discounted_consistently():
+    r = run_dcf()
+    for row in r.rows:
+        assert row.discount_factor == pytest.approx(1 / (1 + r.wacc) ** row.year)
+        assert row.pv_of_fcf == pytest.approx(row.free_cash_flow * row.discount_factor)
+
+
+def test_present_values_sum_to_the_reported_totals():
+    r = run_dcf()
+    assert r.pv_of_forecast == pytest.approx(sum(row.pv_of_fcf for row in r.rows))
+    assert r.pv_of_terminal == pytest.approx(
+        r.terminal_value * r.rows[-1].discount_factor
+    )
+    assert r.enterprise_value == pytest.approx(r.pv_of_forecast + r.pv_of_terminal)
+
+
+def test_equity_value_is_enterprise_value_less_net_debt():
+    r = run_dcf()
+    assert r.net_debt == pytest.approx(r.debt - r.cash)
+    assert r.equity_value == pytest.approx(r.enterprise_value - r.net_debt)
+    assert r.value_per_share == pytest.approx(r.equity_value / r.shares)
+
+
+def test_net_cash_company_reports_negative_net_debt():
+    """NVIDIA holds more cash than debt, so net debt is negative."""
+    assert run_dcf().net_debt < 0
+
+
 # --- guardrails and direction ---
 
 def test_wacc_below_terminal_growth_is_rejected():

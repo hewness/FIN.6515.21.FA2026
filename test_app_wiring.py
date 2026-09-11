@@ -7,6 +7,9 @@ that failure loud.
 """
 
 import inspect
+import re
+
+import pytest
 
 import app
 
@@ -69,3 +72,73 @@ def test_signal_thresholds():
     assert app.signal_for(0.30) == "BUY"
     assert app.signal_for(0.0) == "HOLD"
     assert app.signal_for(-0.40) == "SELL"
+
+
+# --- the projection table must report the engine, not re-derive it ---
+
+
+
+def _panel(**overrides):
+    """Render the valuation panel at defaults, with optional slider overrides."""
+    values = [c.value for c in app.all_inputs]
+    labels = [c.label for c in app.all_inputs]
+    for label, value in overrides.items():
+        values[labels.index(label)] = value
+    return app.valuate(*values)[0]
+
+
+def _body_rows(panel):
+    body = re.search(r"<tbody>(.*?)</tbody>", panel, re.S).group(1)
+    return re.findall(r"<tr>(.*?)</tr>", body, re.S)
+
+
+def test_one_row_per_forecast_year():
+    assert len(_body_rows(_panel())) == 10
+    assert len(_body_rows(_panel(**{"Forecast years": 20}))) == 20
+    assert len(_body_rows(_panel(**{"Forecast years": 5}))) == 5
+
+
+def test_rendered_figures_match_the_model():
+    """Parse the table back out of the HTML and reconcile against run_dcf().
+
+    A table showing numbers the engine never produced would pass every other
+    test in this file -- it renders, it has the right row count, the app runs.
+    Only comparing the printed cells against the model catches it.
+    """
+    from dcf import run_dcf
+
+    r = run_dcf()
+    rendered = _body_rows(_panel())
+    assert len(rendered) == len(r.rows)
+
+    for row, html in zip(r.rows, rendered):
+        # Compare against the model value formatted, so the check is exact rather
+        # than a tolerance that could mask a column landing in the wrong place.
+        assert re.findall(r"<td>(.*?)</td>", html) == [
+            str(row.year),
+            f"{row.growth_rate:+.1%}",
+            f"${row.revenue:,.1f}",
+            f"{row.operating_margin:.1%}",
+            f"${row.operating_income:,.1f}",
+            f"${row.nopat:,.1f}",
+            f"${row.free_cash_flow:,.1f}",
+            f"{row.discount_factor:.3f}",
+            f"${row.pv_of_fcf:,.1f}",
+        ]
+
+
+def test_terminal_and_net_debt_rows_are_present():
+    panel = _panel()
+    assert "Terminal value (Gordon Growth)" in panel
+    assert "Gordon Growth:</strong> terminal value" in panel
+    assert "Net debt" in panel
+    # NVIDIA holds net cash, so the bridge shows it parenthesised
+    assert "($34.7B)" in panel
+
+
+def test_guardrail_renders_a_warning_not_a_half_built_table():
+    panel = _panel(**{"WACC (%)": 4.0, "Terminal growth (%)": 5.0})
+    assert "Cannot value this scenario" in panel
+    assert "<tbody>" not in panel
+
+

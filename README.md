@@ -24,12 +24,19 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-25 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+34 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
-drivers, and the terminal-value guardrail. `test_app_wiring.py` covers the Gradio
-wiring, which binds sliders to the model **positionally**: it asserts the component list
-and the handler signature stay in lockstep, so a slider added or moved in one place but
-not the other fails loudly instead of silently valuing the wrong assumption.
+drivers, the terminal-value guardrail, and the full discounting chain: that terminal
+value really is Gordon Growth, that each year's present value is its cash flow times its
+discount factor, and that the parts sum to the reported totals.
+
+`test_app_wiring.py` covers the UI. Two failure modes get specific guards, because both
+would leave an app that still runs and still prints a plausible number:
+
+- **Positional binding.** `gr.on` binds sliders to the handler by position, so the test
+  asserts the component list and the handler signature stay in lockstep by label.
+- **A table that disagrees with the engine.** The projection table's rendered cells are
+  parsed back out of the HTML and compared, exactly, against a direct `run_dcf()` call.
 
 ## Layout
 
@@ -81,9 +88,15 @@ ways, which the test suite asserts.
 5. **Adds a terminal value** via Gordon Growth. The model refuses to value a scenario
    where WACC does not exceed terminal growth, rather than returning a confident wrong
    number.
-6. **Bridges to per-share value**: enterprise value + cash − debt ÷ shares outstanding.
+6. **Bridges to per-share value**: enterprise value less net debt (cash minus debt),
+   divided by shares outstanding.
 
-The **Valuation** tab shows KPI cards, a Year-1 cash flow build, and the full bridge. The
+The **Valuation** tab shows KPI cards, then a year-by-year forecast table — revenue,
+operating margin, EBIT, NOPAT, free cash flow, discount factor and present value for
+every projected year — and then the equity bridge from enterprise value down to intrinsic
+value per share. Beneath the table the Gordon Growth arithmetic is printed with the
+current scenario's own numbers, so the terminal value can be checked rather than taken on
+trust. The
 **Sensitivity** tab revalues the company across a grid of WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.

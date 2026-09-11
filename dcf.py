@@ -46,9 +46,29 @@ class DCFResult:
     value_per_share: float
     current_price: float
     upside: float              # fraction, e.g. 0.25 == 25% upside
+    wacc: float                # the discount rate this result was built with
+    terminal_growth: float     # the long-run rate feeding the Gordon Growth formula
+
+    @property
+    def net_debt(self) -> float:
+        """Debt less cash. Negative means the company holds net cash."""
+        return self.debt - self.cash
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+def _clean(value: float) -> float:
+    """Strip binary float noise from a rate.
+
+    The same assumption can arrive by two routes -- tapered between two endpoints,
+    or handed over as an explicit per-year list -- and those routes disagree in the
+    last bits (0.6055 vs 0.6054999999999999). That is invisible in the arithmetic
+    but not on screen: at one decimal place the two render as 60.6% and 60.5%, so
+    identical forecasts would display different margins depending on the input mode.
+    Ten decimal places is far finer than any real assumption and normalises both.
+    """
+    return round(value, 10)
 
 
 def _taper_1_to_5(first: float, fifth: float, year: int) -> float:
@@ -60,8 +80,8 @@ def _years_1_to_5(first: float, fifth: float, explicit: list[float] | None,
                   year: int) -> float:
     """Value for a year in 1-5, taken verbatim when the caller supplied a list."""
     if explicit is not None:
-        return explicit[year - 1]
-    return _taper_1_to_5(first, fifth, year)
+        return _clean(explicit[year - 1])
+    return _clean(_taper_1_to_5(first, fifth, year))
 
 
 def growth_schedule(
@@ -92,7 +112,7 @@ def growth_schedule(
         else:
             # Interpolate across the remaining steps between year 5 and the horizon.
             fraction = (year - 5) / (horizon - 5)
-            rates.append(fifth + (terminal_growth - fifth) * fraction)
+            rates.append(_clean(fifth + (terminal_growth - fifth) * fraction))
     return rates
 
 
@@ -121,7 +141,7 @@ def margin_schedule(
         if year <= 5:
             margins.append(_years_1_to_5(year_1_margin, year_5_margin, explicit, year))
         else:
-            margins.append(fifth)
+            margins.append(_clean(fifth))
     return margins
 
 
@@ -217,6 +237,8 @@ def run_dcf(
         value_per_share=value_per_share,
         current_price=current_price,
         upside=upside,
+        wacc=wacc,
+        terminal_growth=terminal_growth,
     )
 
 
