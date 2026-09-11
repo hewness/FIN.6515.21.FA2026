@@ -56,13 +56,14 @@ def test_per_year_defaults_reproduce_the_taper():
     assert app.MARGIN_BY_YEAR == taper_margin
 
 
-def test_valuate_feeds_all_three_panels():
+def test_valuate_feeds_every_panel():
     defaults = [c.value for c in app.all_inputs]
     panels = app.valuate(*defaults)
-    assert len(panels) == 3
-    valuation, chart, heat = panels
+    assert len(panels) == 4
+    valuation, chart, waterfall, heat = panels
     assert "<table class=\"proj\"" in valuation
-    assert "<svg" in chart
+    assert 'class="chart"' in chart
+    assert 'class="wf"' in waterfall
     assert "hm-cell" in heat
 
 
@@ -151,11 +152,13 @@ def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
     labels = [c.label for c in app.all_inputs]
     for label, value in bad.items():
         values[labels.index(label)] = value
-    valuation, chart, _ = app.valuate(*values)
+    valuation, chart, waterfall, _ = app.valuate(*values)
 
     assert "Cannot value this scenario" in valuation
     assert "<tbody>" not in valuation          # no half-built table
     assert "Cannot value this scenario" in chart
     assert "<svg" not in chart                 # no half-drawn chart
+    assert "Cannot value this scenario" in waterfall
+    assert "<svg" not in waterfall             # no half-drawn waterfall
 
 

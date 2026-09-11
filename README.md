@@ -24,7 +24,7 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-49 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+57 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -38,7 +38,7 @@ would leave an app that still runs and still prints a plausible number:
 - **A table that disagrees with the engine.** The projection table's rendered cells are
   parsed back out of the HTML and compared, exactly, against a direct `run_dcf()` call.
 
-`test_viz.py` does the same for the chart, which is harder to check than a table because
+`test_viz.py` does the same for the two charts, which are harder to check than a table because
 it renders and looks plausible whatever it draws. The tests invert the plotted SVG
 coordinates back into dollars and reconcile them against the model, pin the series colors
 to their documented palette slots, and sweep 500 slider combinations asserting the
@@ -50,11 +50,11 @@ substitute available for looking at the thing.
 | File | Contains |
 |---|---|
 | `dcf.py` | The valuation math. Pure functions, no UI imports, independently testable. |
-| `viz.py` | Color scales (computed in OKLab), the heatmap, and the projection chart. |
-| `app.py` | Gradio UI — sliders, the result panels, and the three tabs. |
+| `viz.py` | Color scales (computed in OKLab), the heatmap, the projection chart and the waterfall. |
+| `app.py` | Gradio UI — sliders, the result panels, and the four tabs. |
 | `test_dcf.py` | Valuation math tests. |
 | `test_app_wiring.py` | Guards on the UI-to-model binding. |
-| `test_viz.py` | Guards on the chart's geometry, palette and labels. |
+| `test_viz.py` | Guards on chart geometry, palettes, labels and the waterfall's arithmetic. |
 
 ## Controls
 
@@ -114,9 +114,25 @@ line is the one worth watching: free cash flow climbs every year, but its presen
 growth. That is the mechanism behind terminal value dominating the valuation, and it is
 invisible in the table.
 
-The **Sensitivity** tab revalues the company across a grid of WACC (8–14%) and terminal
+The **Valuation Waterfall** tab shows the same bridge as a chart: five columns carrying
+the running total from discounted forecast cash flows, through the terminal value, to
+enterprise value, then net debt, then equity value. Where the table lists the figures, the
+waterfall makes their relative size structural — the terminal value bar reaches further
+than every projected year combined.
+
+Two details worth knowing. The net-debt bar's **label follows its sign**: NVIDIA holds
+more cash than debt, so it reads "Net cash" and adds value; a bar labelled "Net debt" that
+pushed the total up would be a lie. And that bar is only ~1% of equity value, so it is a
+sliver — deliberately, because that thinness is true information. No broken axis, no
+second scale; the value label carries it.
+
+The **Sensitivity - WACC vs. Terminal Growth** tab revalues the company across a grid of
+WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.
+
+Both the waterfall and the heatmap use the **same diverging pair to mean the same thing**:
+blue is worth more, red is worth less.
 
 ## On the assumptions — read this before quoting a number
 

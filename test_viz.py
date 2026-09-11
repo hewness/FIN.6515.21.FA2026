@@ -1,8 +1,10 @@
-"""Guards on the projection chart.
+"""Guards on the projection chart and the valuation waterfall.
 
 A chart is harder to check than a table: it renders, it looks plausible, and it
 can still be drawing a shape the engine never produced. So these tests invert the
-plotted geometry back into model units and compare.
+plotted geometry back into model units and compare. With no browser available,
+they also sweep slider combinations for label collisions and off-canvas marks --
+the nearest substitute for looking at the thing.
 """
 
 import re
@@ -10,7 +12,10 @@ import re
 import pytest
 
 from dcf import run_dcf
-from viz import _PAD, _H, _W, SERIES, _nice_ceiling, render_projection_chart
+from viz import (
+    _PAD, _H, _W, SERIES, WF_BAR, WF_COLORS, WF_H, WF_PAD, WF_W,
+    _nice_ceiling, render_projection_chart, render_waterfall, waterfall_steps,
+)
 
 
 def _polylines(svg):
@@ -169,3 +174,144 @@ def test_nice_ceiling_covers_the_data():
         assert ceiling >= value
         assert step > 0
         assert ceiling % step == pytest.approx(0, abs=1e-6)
+
+
+# --- valuation waterfall ----------------------------------------------------
+
+THIN = dict(year_1_margin=0.02, year_5_margin=0.02, net_capex_pct=0.20)
+
+
+def _bars(svg):
+    """Step index -> (x, y, width, height) of the rendered bar."""
+    found = {}
+    for m in re.finditer(
+        r'class="wf-bar" data-step="(\d+)" x="([\d.-]+)" y="([\d.-]+)" '
+        r'width="([\d.]+)" height="([\d.-]+)"', svg
+    ):
+        found[int(m.group(1))] = tuple(float(m.group(i)) for i in range(2, 6))
+    return found
+
+
+def _wf_scale(r):
+    """Recover the y-scale the renderer used, so bars can be inverted."""
+    steps = waterfall_steps(r)
+    extremes = [0.0] + [s["start"] for s in steps] + [s["end"] for s in steps]
+    hi, lo = max(extremes), min(extremes)
+    top = _nice_ceiling(hi)[0] if hi > 0 else 0.0
+    bottom = -_nice_ceiling(-lo)[0] if lo < 0 else 0.0
+    return bottom, (top - bottom) or 1.0
+
+
+def _invert_wf(y, bottom, span):
+    plot_h = WF_H - WF_PAD["t"] - WF_PAD["b"]
+    return (1 - (y - WF_PAD["t"]) / plot_h) * span + bottom
+
+
+def test_waterfall_steps_chain_into_equity_value():
+    """Each floating bar starts where the last ended; anchors sit at zero.
+
+    This is the specific way a waterfall goes wrong while still looking fine:
+    bars of plausible height that do not actually add up.
+    """
+    r = run_dcf()
+    steps = waterfall_steps(r)
+    assert [s["kind"] for s in steps] == ["delta", "delta", "anchor", "delta", "anchor"]
+
+    assert steps[0]["start"] == 0
+    assert steps[1]["start"] == pytest.approx(steps[0]["end"])
+    assert steps[1]["end"] == pytest.approx(r.enterprise_value)
+    assert steps[2]["start"] == 0                     # enterprise value anchor
+    assert steps[3]["start"] == pytest.approx(r.enterprise_value)
+    assert steps[3]["end"] == pytest.approx(r.equity_value)
+    assert steps[4]["start"] == 0                     # equity value anchor
+
+    for s in steps:
+        if s["kind"] == "delta":
+            assert s["end"] - s["start"] == pytest.approx(s["amount"])
+
+
+def test_bar_geometry_inverts_back_to_the_model():
+    r = run_dcf()
+    svg = render_waterfall(r)
+    bottom, span = _wf_scale(r)
+    bars = _bars(svg)
+    assert len(bars) == 5
+
+    for i, s in enumerate(waterfall_steps(r)):
+        _, y, _, h = bars[i]
+        high = _invert_wf(y, bottom, span)
+        low = _invert_wf(y + h, bottom, span)
+        assert max(s["start"], s["end"]) == pytest.approx(high, abs=8)
+        assert min(s["start"], s["end"]) == pytest.approx(low, abs=8)
+
+
+def test_columns_respect_the_24_unit_mark_cap():
+    svg = render_waterfall(run_dcf())
+    assert {w for _, _, w, _ in _bars(svg).values()} == {WF_BAR}
+    assert WF_BAR <= 24
+
+
+def test_net_debt_bar_flips_label_and_colour_with_its_sign():
+    """A bar reading "Net debt" that pushes the total up would be a lie."""
+    net_cash = run_dcf()                                   # cash 43.2 > debt 8.5
+    assert net_cash.net_debt < 0
+    step = waterfall_steps(net_cash)[3]
+    assert step["label"] == "Net cash"
+    assert step["amount"] > 0
+    assert "Net cash" in render_waterfall(net_cash)
+
+    leveraged = run_dcf(cash=5.0, debt=90.0)               # now genuinely indebted
+    assert leveraged.net_debt > 0
+    step = waterfall_steps(leveraged)[3]
+    assert step["label"] == "Net debt"
+    assert step["amount"] < 0
+    svg = render_waterfall(leveraged)
+    assert "Net debt" in svg
+    assert WF_COLORS["decrease"]["light"] in svg           # and it is red
+
+
+def test_negative_components_render_below_a_zero_line():
+    """Thin margins with heavy capex invert both present values."""
+    r = run_dcf(**THIN)
+    assert r.pv_of_forecast < 0 and r.pv_of_terminal < 0
+
+    svg = render_waterfall(r)
+    assert 'class="wf-zero"' in svg                        # zero line appears
+    bottom, span = _wf_scale(r)
+    assert bottom < 0                                      # domain covers them
+
+    zero_y = float(re.search(r'class="wf-zero"[^>]*y1="([\d.-]+)"', svg).group(1))
+    for i in (0, 1):
+        _, y, _, h = _bars(svg)[i]
+        assert y + h > zero_y                              # extends below zero
+
+
+def test_fills_are_the_documented_diverging_poles():
+    svg = render_waterfall(run_dcf())
+    assert WF_COLORS["increase"]["light"] in svg           # blue adds
+    assert WF_COLORS["total"]["light"] in svg              # grey totals
+    assert WF_COLORS == {
+        "increase": {"light": "#2a78d6", "dark": "#3987e5"},
+        "decrease": {"light": "#e34948", "dark": "#e66767"},
+        "total": {"light": "#898781", "dark": "#898781"},
+    }
+
+
+def test_every_bar_carries_a_hit_target_over_24px():
+    svg = render_waterfall(run_dcf())
+    widths = [float(w) for w in re.findall(r'class="wf-hit"[^>]*width="([\d.]+)"', svg)]
+    assert len(widths) == 5
+    assert min(widths) >= 24
+
+
+def test_waterfall_geometry_stays_on_canvas():
+    """Numeric stand-in for eyeballing, across ordinary and extreme settings."""
+    scenarios = [{}, THIN, dict(cash=5.0, debt=90.0), dict(wacc=0.19),
+                 dict(horizon=20), dict(year_1_growth=-0.20, year_5_margin=0.05)]
+    for kwargs in scenarios:
+        svg = render_waterfall(run_dcf(**kwargs))
+        for x, y, w, h in _bars(svg).values():
+            assert 0 <= x and x + w <= WF_W
+            assert 0 <= y and y + h <= WF_H
+        for y in re.findall(r'class="wf-value"[^>]*y="([\d.-]+)"', svg):
+            assert 0 <= float(y) <= WF_H

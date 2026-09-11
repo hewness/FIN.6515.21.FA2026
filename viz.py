@@ -1,8 +1,9 @@
-"""Color and HTML rendering for the sensitivity heatmap.
+"""Colour scales and SVG rendering for the app's three visualisations.
 
-The heatmap's job is *polarity* -- is this scenario's intrinsic value above or
-below the market price -- so it uses a diverging scale: two hues with a neutral
-gray midpoint at fair value, equal steps per arm.
+Holds the OKLab colour maths, the sensitivity heatmap, the projection chart and
+the valuation waterfall. Two of the three encode *polarity* -- above or below a
+reference -- so they share one diverging pair and one meaning: blue is worth
+more, red is worth less.
 """
 
 # Diverging poles and neutral midpoint, per the reference palette.
@@ -332,5 +333,148 @@ def render_projection_chart(r) -> str:
         {bands}
       </svg>
       <p class="c-note">All figures $B. Hover any year for the full read-out.</p>
+    </div>
+    """
+
+
+# --- valuation waterfall ----------------------------------------------------
+# Polarity, so the colour job is diverging -- and the poles are the ones the
+# heatmap already uses, keeping one meaning across the app: blue adds value, red
+# takes it away. Totals sit in a neutral that is deliberately not either pole.
+# All three clear 3:1 on both surfaces. Direction of travel and a signed value
+# label carry the same information, so colour is never the only channel.
+WF_COLORS = {
+    "increase": {"light": "#2a78d6", "dark": "#3987e5"},
+    "decrease": {"light": "#e34948", "dark": "#e66767"},
+    "total": {"light": "#898781", "dark": "#898781"},
+}
+
+WF_W, WF_H = 720, 360
+WF_PAD = {"l": 62, "r": 20, "t": 22, "b": 54}
+WF_BAR = 24.0        # mark spec caps a column here; the band's leftover is air
+
+
+def waterfall_steps(r) -> list[dict]:
+    """The bridge as a list of contributions and running totals.
+
+    Anchored steps (the subtotal and the total) are drawn from zero; the rest
+    float, each starting where the previous one ended.
+    """
+    net_cash = -r.net_debt          # positive when the company holds net cash
+    return [
+        {"label": "PV of forecast\ncash flows", "amount": r.pv_of_forecast,
+         "start": 0.0, "end": r.pv_of_forecast, "kind": "delta"},
+        {"label": "PV of terminal\nvalue", "amount": r.pv_of_terminal,
+         "start": r.pv_of_forecast, "end": r.enterprise_value, "kind": "delta"},
+        {"label": "Enterprise\nvalue", "amount": r.enterprise_value,
+         "start": 0.0, "end": r.enterprise_value, "kind": "anchor"},
+        # A bar labelled "Net debt" that pushes the total UP would be a lie, so
+        # the label follows the sign, matching the equity bridge's wording.
+        {"label": "Net cash" if net_cash >= 0 else "Net debt", "amount": net_cash,
+         "start": r.enterprise_value, "end": r.equity_value, "kind": "delta"},
+        {"label": "Equity\nvalue", "amount": r.equity_value,
+         "start": 0.0, "end": r.equity_value, "kind": "anchor"},
+    ]
+
+
+def _wf_fill(step: dict) -> dict:
+    if step["kind"] == "anchor":
+        return WF_COLORS["total"]
+    return WF_COLORS["increase" if step["amount"] >= 0 else "decrease"]
+
+
+def render_waterfall(r) -> str:
+    """Vertical waterfall from discounted cash flows to equity value."""
+    steps = waterfall_steps(r)
+    n = len(steps)
+
+    # The domain has to cover every bar end, and zero, since components can go
+    # negative at thin margins with heavy capex.
+    extremes = [0.0] + [s["start"] for s in steps] + [s["end"] for s in steps]
+    hi, lo = max(extremes), min(extremes)
+    top, step_size = _nice_ceiling(hi) if hi > 0 else (0.0, 1.0)
+    bottom = -_nice_ceiling(-lo)[0] if lo < 0 else 0.0
+    span = (top - bottom) or 1.0
+
+    plot_w = WF_W - WF_PAD["l"] - WF_PAD["r"]
+    plot_h = WF_H - WF_PAD["t"] - WF_PAD["b"]
+    band = plot_w / n
+
+    def y_at(v: float) -> float:
+        return WF_PAD["t"] + plot_h * (1 - (v - bottom) / span)
+
+    def cx(i: int) -> float:
+        return WF_PAD["l"] + band * (i + 0.5)
+
+    # Gridlines across the whole domain, hairline and solid.
+    grid, ticks = "", ""
+    level = bottom
+    while level <= top + 1e-9:
+        y = y_at(level)
+        grid += f'<line class="wf-grid" x1="{WF_PAD["l"]}" y1="{y:.1f}" x2="{WF_PAD["l"] + plot_w}" y2="{y:.1f}"/>'
+        ticks += f'<text class="wf-tick wf-tick-y" x="{WF_PAD["l"] - 8}" y="{y + 3.5:.1f}">{level:,.0f}</text>'
+        level += step_size
+
+    bars, labels, connectors, hits = "", "", "", ""
+    for i, s in enumerate(steps):
+        fill = _wf_fill(s)
+        y_top, y_bot = y_at(max(s["start"], s["end"])), y_at(min(s["start"], s["end"]))
+        height = max(y_bot - y_top, 1.5)          # keep a sliver visible
+        x = cx(i) - WF_BAR / 2
+        bars += (
+            f'<rect class="wf-bar" data-step="{i}" x="{x:.1f}" y="{y_top:.1f}" '
+            f'width="{WF_BAR}" height="{height:.1f}" rx="3" '
+            f'style="--c-l:{fill["light"]};--c-d:{fill["dark"]}"/>'
+        )
+
+        # Signed for deltas, plain for the anchored subtotal and total.
+        shown = (f'{s["amount"]:+,.0f}' if s["kind"] == "delta" else f'{s["amount"]:,.0f}')
+        labels += (
+            f'<text class="wf-value" x="{cx(i):.1f}" y="{y_top - 7:.1f}">{shown}</text>'
+        )
+        for line_no, part in enumerate(s["label"].split("\n")):
+            labels += (
+                f'<text class="wf-cat" x="{cx(i):.1f}" '
+                f'y="{WF_PAD["t"] + plot_h + 18 + line_no * 12:.1f}">{part}</text>'
+            )
+
+        # Connector from this bar's end to where the next one starts.
+        if i < n - 1:
+            y_link = y_at(s["end"])
+            connectors += (
+                f'<line class="wf-link" x1="{cx(i) + WF_BAR / 2:.1f}" y1="{y_link:.1f}" '
+                f'x2="{cx(i + 1) - WF_BAR / 2:.1f}" y2="{y_link:.1f}"/>'
+            )
+
+        # Hit target spans the band, comfortably wider than the 24-unit bar.
+        tip = (f'{s["label"].replace(chr(10), " ")}: ${s["amount"]:,.1f}B'
+               f' \u00b7 running total ${s["end"]:,.1f}B')
+        hits += (
+            f'<g class="wf-hit-g"><rect class="wf-hit" x="{cx(i) - band / 2:.1f}" '
+            f'y="{WF_PAD["t"]}" width="{band:.1f}" height="{plot_h:.1f}">'
+            f'<title>{tip}</title></rect></g>'
+        )
+
+    zero_line = ""
+    if bottom < 0:
+        zero_line = (f'<line class="wf-zero" x1="{WF_PAD["l"]}" y1="{y_at(0):.1f}" '
+                     f'x2="{WF_PAD["l"] + plot_w}" y2="{y_at(0):.1f}"/>')
+
+    per_share = (
+        f'Equity value ${r.equity_value:,.0f}B &divide; {r.shares:,.1f}B shares = '
+        f'<strong>${r.value_per_share:,.2f}</strong> per share, against a '
+        f'${r.current_price:,.2f} market price.'
+    )
+
+    return f"""
+    <div class="wf-wrap">
+      <svg class="wf" viewBox="0 0 {WF_W} {WF_H}" role="img"
+           aria-label="Waterfall from discounted cash flows and terminal value to equity value">
+        {grid}{zero_line}
+        {ticks}
+        {connectors}{bars}{labels}
+        {hits}
+      </svg>
+      <p class="wf-note">{per_share}</p>
     </div>
     """

@@ -3,7 +3,7 @@
 import gradio as gr
 
 from dcf import NVDA_DEFAULTS, run_dcf, sensitivity_grid
-from viz import render_heatmap, render_projection_chart
+from viz import render_heatmap, render_projection_chart, render_waterfall
 
 # Upside thresholds that separate the three signals.
 BUY_ABOVE = 0.15
@@ -106,6 +106,29 @@ CSS = """
 html:not(.dark) .c-key-line { background: var(--c-l); }
 html:not(.dark) .c-line { stroke: var(--c-l); }
 html:not(.dark) .c-end, html:not(.dark) .c-dot { fill: var(--c-l); }
+
+/* --- valuation waterfall --- */
+.wf-wrap { margin-top: 4px; }
+.wf { width: 100%; height: auto; display: block; }
+.wf-grid { stroke: var(--border-color-primary); stroke-width: 1; }
+.wf-zero { stroke: var(--body-text-color-subdued); stroke-width: 1; stroke-opacity: .7; }
+.wf-link { stroke: var(--body-text-color-subdued); stroke-width: 1; stroke-opacity: .45; }
+.wf-bar { fill: var(--c-l); }
+.wf-tick { font-size: 11px; fill: var(--body-text-color-subdued); text-anchor: middle;
+           font-variant-numeric: tabular-nums; }
+.wf-tick-y { text-anchor: end; }
+.wf-value { font-size: 11px; font-weight: 650; fill: var(--body-text-color);
+            text-anchor: middle; font-variant-numeric: tabular-nums; }
+.wf-cat { font-size: 10.5px; fill: var(--body-text-color-subdued); text-anchor: middle; }
+/* Bars carry their own <title> tooltip -- on a bar chart the mark is the hit
+   target, so there is no crosshair to reveal. */
+.wf-hit { fill: transparent; }
+.wf-note { font-size: 0.82rem; color: var(--body-text-color-subdued);
+           margin: 10px 0 0; line-height: 1.5; }
+
+@media (prefers-color-scheme: dark) { .wf-bar { fill: var(--c-d); } }
+.dark .wf-bar { fill: var(--c-d); }
+html:not(.dark) .wf-bar { fill: var(--c-l); }
 
 /* --- sensitivity heatmap --- */
 .hm-scroll { overflow-x: auto; }
@@ -241,7 +264,7 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
     except ValueError as exc:
         # Every panel gets the warning -- never a half-drawn chart or table.
         warning = f'<div class="warn"><strong>Cannot value this scenario.</strong><br>{exc}</div>'
-        return warning, warning, heat
+        return warning, warning, warning, heat
 
     signal = signal_for(r.upside)
     color, bg = SIGNAL_COLORS[signal]
@@ -277,6 +300,7 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
     """
     return (f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
             render_projection_chart(r),
+            render_waterfall(r),
             heat)
 
 
@@ -340,7 +364,16 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                         "outruns growth. That is why so much of the valuation ends up "
                         "in the terminal value rather than the years you projected."
                     )
-                with gr.Tab("Sensitivity"):
+                with gr.Tab("Valuation Waterfall"):
+                    waterfall = gr.HTML()
+                    gr.Markdown(
+                        "Each bar is a contribution to equity value. **Blue adds, red "
+                        "subtracts, grey is a running total** &mdash; the same meaning "
+                        "those colours carry in the sensitivity grid. Note how far the "
+                        "terminal value bar reaches next to every projected year "
+                        "combined."
+                    )
+                with gr.Tab("Sensitivity - WACC vs. Terminal Growth"):
                     heatmap = gr.HTML()
                     gr.Markdown(
                         "Each cell revalues the company at that WACC and terminal growth "
@@ -385,7 +418,7 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         triggers=[c.change for c in all_inputs] + [demo.load],
         fn=valuate,
         inputs=all_inputs,
-        outputs=[results, chart, heatmap],
+        outputs=[results, chart, waterfall, heatmap],
     )
 
     def switch_mode(selected):
