@@ -59,12 +59,15 @@ def test_per_year_defaults_reproduce_the_taper():
 def test_valuate_feeds_every_panel():
     defaults = [c.value for c in app.all_inputs]
     panels = app.valuate(*defaults)
-    assert len(panels) == 4
-    valuation, chart, waterfall, heat = panels
+    assert len(panels) == 5
+    valuation, chart, waterfall, heat, margin_heat = panels
     assert "<table class=\"proj\"" in valuation
     assert 'class="chart"' in chart
     assert 'class="wf"' in waterfall
-    assert "hm-cell" in heat
+    assert "hm-cell" in heat and "hm-cell" in margin_heat
+    # the two grids must name different axes
+    assert "WACC &rarr;" in heat or "WACC →" in heat
+    assert "Year 5 operating margin" in margin_heat
 
 
 def test_both_modes_render_the_same_panels_at_defaults():
@@ -152,7 +155,7 @@ def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
     labels = [c.label for c in app.all_inputs]
     for label, value in bad.items():
         values[labels.index(label)] = value
-    valuation, chart, waterfall, _ = app.valuate(*values)
+    valuation, chart, waterfall, *grids = app.valuate(*values)
 
     assert "Cannot value this scenario" in valuation
     assert "<tbody>" not in valuation          # no half-built table
@@ -160,5 +163,17 @@ def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
     assert "<svg" not in chart                 # no half-drawn chart
     assert "Cannot value this scenario" in waterfall
     assert "<svg" not in waterfall             # no half-drawn waterfall
+
+    # The sensitivity grids deliberately do NOT warn: each cell is its own
+    # scenario, so the grid stays useful when the centre point is unvaluable.
+    # Unreachable cells render as a dash instead.
+    wacc_grid, margin_grid = grids
+    for grid in grids:
+        assert "Cannot value this scenario" not in grid
+        assert "hm-cell" in grid
+    # WACC 4% against terminal growth 1-5% makes the upper rows impossible
+    assert "hm-na" in margin_grid
+    # but the WACC grid varies WACC 8-14%, all of which clear 5% terminal growth
+    assert "hm-na" not in wacc_grid
 
 

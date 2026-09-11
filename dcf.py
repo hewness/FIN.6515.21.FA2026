@@ -6,6 +6,11 @@ All money figures are in billions of USD unless noted; per-share figures are in 
 
 from dataclasses import dataclass, asdict
 
+# Margin defaults, named so the sensitivity axis can rebuild the taper from them
+# rather than duplicating the literals.
+DEFAULT_YEAR_1_MARGIN = 0.624
+DEFAULT_YEAR_5_MARGIN = 0.55
+
 # NVIDIA starting figures (FY2025 actuals, $B except shares and price).
 NVDA_DEFAULTS = {
     "revenue": 130.5,
@@ -150,8 +155,8 @@ def run_dcf(
     year_1_growth: float = 0.50,
     year_5_growth: float = 0.15,
     growth_rates: list[float] | None = None,
-    year_1_margin: float = 0.624,
-    year_5_margin: float = 0.55,
+    year_1_margin: float = DEFAULT_YEAR_1_MARGIN,
+    year_5_margin: float = DEFAULT_YEAR_5_MARGIN,
     operating_margins: list[float] | None = None,
     terminal_growth: float = 0.03,
     tax_rate: float = 0.15,
@@ -242,22 +247,64 @@ def run_dcf(
     )
 
 
+def apply_year_5_margin(assumptions: dict, margin: float) -> dict:
+    """Move the Year-5 margin, leaving years 1-4 exactly where they were.
+
+    Two things make this fiddlier than a keyword assignment:
+
+    1. An explicit `operating_margins` list wins over `year_5_margin` inside
+       `run_dcf`, so in per-year mode setting the keyword alone does nothing --
+       a sensitivity axis built that way renders identical columns and looks
+       perfectly fine doing it.
+    2. In taper mode the Year-5 margin is the taper's *endpoint*, so moving it
+       would drag years 2-4 along. That makes the same question ("what if the
+       persistent margin were 40%?") get two different answers depending on
+       which input mode happens to be selected.
+
+    Both are solved by materialising the first five margins and replacing only
+    the fifth, so the axis is a clean single-variable perturbation either way.
+    """
+    out = dict(assumptions)
+    explicit = out.get("operating_margins")
+    if explicit is None:
+        explicit = [
+            _years_1_to_5(out.get("year_1_margin", DEFAULT_YEAR_1_MARGIN),
+                          out.get("year_5_margin", DEFAULT_YEAR_5_MARGIN),
+                          None, year)
+            for year in range(1, 6)
+        ]
+    out["operating_margins"] = list(explicit[:4]) + [_clean(margin)]
+    out.pop("year_5_margin", None)          # the list wins; drop the dead keyword
+    return out
+
+
+def _apply_axis(assumptions: dict, param: str, value: float) -> dict:
+    """Put one axis value into the assumptions, however that parameter is set."""
+    if param == "year_5_margin":
+        return apply_year_5_margin(assumptions, value)
+    return {**assumptions, param: value}
+
+
 def sensitivity_grid(
-    wacc_values: list[float],
-    terminal_values: list[float],
+    x_param: str,
+    x_values: list[float],
+    y_param: str,
+    y_values: list[float],
     **assumptions,
 ) -> list[list[DCFResult | None]]:
-    """Value the company at every (terminal growth, WACC) pair.
+    """Value the company at every (y, x) pair on the two given axes.
 
-    Rows are terminal growth rates, columns are WACCs. A pair where WACC does
-    not exceed terminal growth has no finite value; that cell comes back None.
+    Rows are `y_values`, columns are `x_values`. A combination the model refuses
+    to value -- WACC at or below terminal growth -- comes back as None so the
+    caller can render it as an empty cell.
     """
     grid = []
-    for g in terminal_values:
+    for y in y_values:
         row = []
-        for w in wacc_values:
+        for x in x_values:
+            cell = _apply_axis(_apply_axis(assumptions, y_param, y), x_param, x)
             try:
-                row.append(run_dcf(wacc=w, terminal_growth=g, **assumptions))
+                row.append(run_dcf(**cell))
             except ValueError:
                 row.append(None)
         grid.append(row)

@@ -24,7 +24,7 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-57 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+64 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -51,7 +51,7 @@ substitute available for looking at the thing.
 |---|---|
 | `dcf.py` | The valuation math. Pure functions, no UI imports, independently testable. |
 | `viz.py` | Color scales (computed in OKLab), the heatmap, the projection chart and the waterfall. |
-| `app.py` | Gradio UI — sliders, the result panels, and the four tabs. |
+| `app.py` | Gradio UI — sliders, the result panels, and the five tabs. |
 | `test_dcf.py` | Valuation math tests. |
 | `test_app_wiring.py` | Guards on the UI-to-model binding. |
 | `test_viz.py` | Guards on chart geometry, palettes, labels and the waterfall's arithmetic. |
@@ -131,7 +131,17 @@ WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.
 
-Both the waterfall and the heatmap use the **same diverging pair to mean the same thing**:
+The **Sensitivity - Operating Margin vs. Terminal Growth** tab is the same grid against
+margin instead of discount rate. Its column axis is the **Year-5 operating margin** —
+the level that holds flat from Year 5 into perpetuity — so both of its axes govern the
+terminal economics. Year-1 margin stays wherever you set it, and the rows match the
+other sensitivity tab so the two grids can be read against each other.
+
+Note that the sensitivity grids **do not** blank out when the current scenario is
+unvaluable. Each cell is its own scenario, so the grid stays useful and simply dashes
+out the combinations where WACC fails to exceed terminal growth.
+
+The waterfall and both heatmaps use the **same diverging pair to mean the same thing**:
 blue is worth more, red is worth less.
 
 ## On the assumptions — read this before quoting a number

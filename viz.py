@@ -95,25 +95,27 @@ def ink_for(bg_hex: str, mode: str) -> str:
     return INK[mode]["on_dark"] if L < 0.62 else INK[mode]["on_light"]
 
 
-def render_heatmap(grid, wacc_values, terminal_values, current_price) -> str:
-    """Diverging heatmap of intrinsic value per share.
+def render_heatmap(grid, x_values, y_values, current_price,
+                   x_label: str = "WACC", y_label: str = "Terminal growth") -> str:
+    """Diverging heatmap of intrinsic value per share across two varied inputs.
 
     Every cell prints its own value, so color is never the only encoding, and
-    the grid doubles as the table view.
+    the grid doubles as the table view. The axes are named by the caller so the
+    same component serves more than one pair of assumptions.
     """
     ramps = {m: diverging_ramp(m) for m in ("light", "dark")}
 
-    head = "".join(f"<th>{w:.0%}</th>" for w in wacc_values)
+    head = "".join(f"<th>{x:.0%}</th>" for x in x_values)
     body = ""
-    for g, row in zip(terminal_values, grid):
+    for y, row in zip(y_values, grid):
         cells = ""
-        for w, res in zip(wacc_values, row):
+        for x, res in zip(x_values, row):
             if res is None:
                 cells += '<td class="hm-na" title="WACC must exceed terminal growth">–</td>'
                 continue
             i = band_index(res.upside)
             bg_l, bg_d = ramps["light"][i], ramps["dark"][i]
-            tip = (f"WACC {w:.1%} · terminal growth {g:.1%}&#10;"
+            tip = (f"{x_label} {x:.1%} · {y_label.lower()} {y:.1%}&#10;"
                    f"Value ${res.value_per_share:,.2f} vs price ${current_price:,.2f}"
                    f"&#10;{res.upside:+.1%}")
             cells += (
@@ -123,7 +125,7 @@ def render_heatmap(grid, wacc_values, terminal_values, current_price) -> str:
                 f'<span class="hm-v">${res.value_per_share:,.0f}</span>'
                 f'<span class="hm-u">{res.upside:+.0%}</span></td>'
             )
-        body += f'<tr><th class="hm-rh">{g:.1%}</th>{cells}</tr>'
+        body += f'<tr><th class="hm-rh">{y:.1%}</th>{cells}</tr>'
 
     legend_swatches = ""
     labels = ["≤−50%", "−30%", "−15%", "−5%", "fair", "+5%", "+15%", "+30%", "≥+50%"]
@@ -140,7 +142,7 @@ def render_heatmap(grid, wacc_values, terminal_values, current_price) -> str:
         <table class="hm">
           <caption class="hm-cap">Intrinsic value per share · upside vs.
             ${current_price:,.2f} market price</caption>
-          <thead><tr><th class="hm-corner">Terminal ↓ / WACC →</th>{head}</tr></thead>
+          <thead><tr><th class="hm-corner">{y_label} ↓ / {x_label} →</th>{head}</tr></thead>
           <tbody>{body}</tbody>
         </table>
       </div>

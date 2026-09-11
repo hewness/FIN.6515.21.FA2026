@@ -15,9 +15,12 @@ SIGNAL_COLORS = {
     "SELL": ("#dc2626", "rgba(220,38,38,0.12)"),
 }
 
-# Sensitivity axes: WACC 8-14%, terminal growth 1-5%.
+# Sensitivity axes. Both grids share the terminal-growth rows, so the two can be
+# read against each other; only the columns differ.
 WACC_AXIS = [0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14]
 TERMINAL_AXIS = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05]
+# Brackets the 55% default and NVIDIA's actual 62.4%.
+MARGIN_AXIS = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
 
 TAPER, PER_YEAR = "Taper Y1 to Y5", "Set each year"
 
@@ -256,15 +259,30 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
         horizon=int(horizon),
     )
 
-    grid = sensitivity_grid(WACC_AXIS, TERMINAL_AXIS, **shared)
-    heat = render_heatmap(grid, WACC_AXIS, TERMINAL_AXIS, NVDA_DEFAULTS["current_price"])
+    price = NVDA_DEFAULTS["current_price"]
+    heat = render_heatmap(
+        sensitivity_grid("wacc", WACC_AXIS, "terminal_growth", TERMINAL_AXIS, **shared),
+        WACC_AXIS, TERMINAL_AXIS, price,
+        x_label="WACC", y_label="Terminal growth",
+    )
+    # `shared` leaves WACC out because the grid above varies it as an axis. This
+    # grid does not, so it has to pass the slider's value through explicitly --
+    # otherwise every cell would quietly use run_dcf's 10% default and the WACC
+    # slider would have no effect on this tab at all.
+    margin_heat = render_heatmap(
+        sensitivity_grid("year_5_margin", MARGIN_AXIS,
+                         "terminal_growth", TERMINAL_AXIS,
+                         wacc=wacc / 100, **shared),
+        MARGIN_AXIS, TERMINAL_AXIS, price,
+        x_label="Year 5 operating margin", y_label="Terminal growth",
+    )
 
     try:
         r = run_dcf(wacc=wacc / 100, terminal_growth=terminal_growth / 100, **shared)
     except ValueError as exc:
         # Every panel gets the warning -- never a half-drawn chart or table.
         warning = f'<div class="warn"><strong>Cannot value this scenario.</strong><br>{exc}</div>'
-        return warning, warning, warning, heat
+        return warning, warning, warning, heat, margin_heat
 
     signal = signal_for(r.upside)
     color, bg = SIGNAL_COLORS[signal]
@@ -301,7 +319,8 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
     return (f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
             render_projection_chart(r),
             render_waterfall(r),
-            heat)
+            heat,
+            margin_heat)
 
 
 with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
@@ -380,6 +399,16 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                         "rate, holding every other assumption at your slider settings. "
                         "Blue is worth more than the market price, red is worth less."
                     )
+                with gr.Tab("Sensitivity - Operating Margin vs. Terminal Growth"):
+                    margin_heatmap = gr.HTML()
+                    gr.Markdown(
+                        "The same grid against margin instead of discount rate. The "
+                        "column axis is the **Year-5 operating margin** &mdash; the level "
+                        "that holds flat from Year 5 into perpetuity &mdash; so both axes "
+                        "here govern the terminal economics. Year-1 margin stays wherever "
+                        "you set it. Rows match the other sensitivity tab, so the two "
+                        "grids can be read against each other."
+                    )
 
     # Every slider stays wired in regardless of visibility -- hidden components keep
     # their values, and `mode` decides which set the model actually reads.
@@ -418,7 +447,7 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         triggers=[c.change for c in all_inputs] + [demo.load],
         fn=valuate,
         inputs=all_inputs,
-        outputs=[results, chart, waterfall, heatmap],
+        outputs=[results, chart, waterfall, heatmap, margin_heatmap],
     )
 
     def switch_mode(selected):

@@ -203,7 +203,7 @@ TERM_AXIS = [0.01, 0.03, 0.05]
 
 
 def test_grid_shape_and_direction():
-    grid = sensitivity_grid(WACC_AXIS, TERM_AXIS)
+    grid = sensitivity_grid("wacc", WACC_AXIS, "terminal_growth", TERM_AXIS)
     assert len(grid) == len(TERM_AXIS)
     assert all(len(row) == len(WACC_AXIS) for row in grid)
 
@@ -217,7 +217,7 @@ def test_grid_shape_and_direction():
 
 def test_grid_marks_impossible_pairs_none():
     """WACC 2% with terminal growth 5% has no finite value."""
-    grid = sensitivity_grid([0.02, 0.10], [0.05])
+    grid = sensitivity_grid("wacc", [0.02, 0.10], "terminal_growth", [0.05])
     assert grid[0][0] is None
     assert grid[0][1] is not None
 
@@ -239,3 +239,90 @@ def test_ramp_is_monotonic_outward_from_neutral(mode):
     assert under == sorted(under) or under == sorted(under, reverse=True)
     # the neutral midpoint sits closest to the surface in both modes
     assert lightness[4] == (max(lightness) if mode == "light" else min(lightness))
+
+
+# --- the generalised sensitivity grid ---
+
+from dcf import apply_year_5_margin, margin_schedule as _ms  # noqa: E402
+
+MARGIN_AXIS = [0.40, 0.50, 0.60, 0.70]
+
+
+def test_generalised_grid_reproduces_the_wacc_one():
+    """Refactoring the grid must not move a single number on the WACC tab."""
+    grid = sensitivity_grid("wacc", WACC_AXIS, "terminal_growth", TERM_AXIS)
+    for g, row in zip(TERM_AXIS, grid):
+        for w, cell in zip(WACC_AXIS, row):
+            assert cell.value_per_share == pytest.approx(
+                run_dcf(wacc=w, terminal_growth=g).value_per_share
+            )
+
+
+def test_margin_axis_actually_bites_in_per_year_mode():
+    """The trap: an explicit margin list silently overrides year_5_margin.
+
+    A grid that set the keyword alone would render identical columns and look
+    entirely convincing doing it.
+    """
+    per_year = dict(operating_margins=[0.624, 0.6055, 0.587, 0.5685, 0.55])
+
+    # the naive approach really is inert -- this is what we are guarding against
+    assert run_dcf(**per_year, year_5_margin=0.20).value_per_share == pytest.approx(
+        run_dcf(**per_year).value_per_share
+    )
+
+    grid = sensitivity_grid("year_5_margin", MARGIN_AXIS,
+                            "terminal_growth", TERM_AXIS, **per_year)
+    values = [c.value_per_share for c in grid[0]]
+    assert len(set(round(v, 2) for v in values)) == len(values)   # every column differs
+    assert values == sorted(values)                               # and rises with margin
+
+
+def test_margin_axis_means_the_same_thing_in_both_input_modes():
+    """Moving a taper's endpoint would drag years 2-4; per-year mode would not.
+
+    Left alone, the same question gets two answers depending on an input toggle.
+    """
+    taper = dict(year_1_margin=0.624, year_5_margin=0.55)
+    per_year = dict(operating_margins=_ms(0.624, 0.55, horizon=10)[:5])
+
+    for margin in MARGIN_AXIS:
+        from_taper = run_dcf(**apply_year_5_margin(taper, margin))
+        from_list = run_dcf(**apply_year_5_margin(per_year, margin))
+        assert from_taper.value_per_share == pytest.approx(from_list.value_per_share)
+
+
+def test_apply_year_5_margin_leaves_earlier_years_untouched():
+    out = apply_year_5_margin(dict(year_1_margin=0.624, year_5_margin=0.55), 0.40)
+    assert out["operating_margins"] == pytest.approx(
+        [0.624, 0.6055, 0.587, 0.5685, 0.40]
+    )
+    assert "year_5_margin" not in out          # the dead keyword is dropped
+
+
+def test_margin_grid_direction():
+    grid = sensitivity_grid("year_5_margin", MARGIN_AXIS,
+                            "terminal_growth", TERM_AXIS)
+    values = [[c.value_per_share for c in row] for row in grid]
+    for row in values:                                  # value rises with margin
+        assert row == sorted(row)
+    for col in range(len(MARGIN_AXIS)):                 # and with terminal growth
+        assert [r[col] for r in values] == sorted(r[col] for r in values)
+
+
+def test_margin_grid_honours_the_wacc_it_is_given():
+    """It varies margin and terminal growth, so WACC must come from the caller."""
+    cheap = sensitivity_grid("year_5_margin", MARGIN_AXIS, "terminal_growth",
+                             [0.03], wacc=0.08)[0][0].value_per_share
+    dear = sensitivity_grid("year_5_margin", MARGIN_AXIS, "terminal_growth",
+                            [0.03], wacc=0.14)[0][0].value_per_share
+    assert dear < cheap
+
+
+def test_margin_grid_marks_unreachable_rows_none():
+    """Holding WACC at 4% makes every row at or above it impossible."""
+    grid = sensitivity_grid("year_5_margin", [0.55], "terminal_growth",
+                            [0.02, 0.04, 0.05], wacc=0.04)
+    assert grid[0][0] is not None      # 2% terminal growth is fine
+    assert grid[1][0] is None          # 4% is not, at a 4% WACC
+    assert grid[2][0] is None
