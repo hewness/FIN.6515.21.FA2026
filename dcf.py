@@ -22,10 +22,11 @@ class YearRow:
     year: int
     growth_rate: float
     revenue: float
-    gross_profit: float
-    opex: float
+    operating_margin: float
     operating_income: float
     nopat: float
+    net_capex: float
+    change_in_nwc: float
     free_cash_flow: float
     discount_factor: float
     pv_of_fcf: float
@@ -50,47 +51,94 @@ class DCFResult:
         return asdict(self)
 
 
+def _taper_1_to_5(first: float, fifth: float, year: int) -> float:
+    """Linear glide from the year-1 value to the year-5 value."""
+    return first + (fifth - first) * ((year - 1) / 4)
+
+
+def _years_1_to_5(first: float, fifth: float, explicit: list[float] | None,
+                  year: int) -> float:
+    """Value for a year in 1-5, taken verbatim when the caller supplied a list."""
+    if explicit is not None:
+        return explicit[year - 1]
+    return _taper_1_to_5(first, fifth, year)
+
+
 def growth_schedule(
     year_1_growth: float,
     year_5_growth: float,
     terminal_growth: float,
     horizon: int,
+    explicit: list[float] | None = None,
 ) -> list[float]:
-    """Growth rate for each forecast year.
+    """Revenue growth rate for each forecast year.
 
-    Years 1-5 glide linearly from `year_1_growth` to `year_5_growth`. Any years
-    beyond that glide linearly from `year_5_growth` to `terminal_growth`, so the
-    final forecast year lands on the long-run rate and the terminal value formula
-    does not have to absorb a sudden drop.
+    Years 1-5 either glide linearly from `year_1_growth` to `year_5_growth`, or are
+    taken verbatim from `explicit` (a 5-element list). Any years beyond that glide
+    from the year-5 rate to `terminal_growth`, so the final forecast year lands on
+    the long-run rate and the terminal value formula does not absorb a sudden drop.
     """
     if horizon < 1:
         raise ValueError("horizon must be at least 1 year")
+    if explicit is not None and len(explicit) != 5:
+        raise ValueError("explicit growth rates must cover exactly years 1-5")
+
+    fifth = explicit[4] if explicit is not None else year_5_growth
 
     rates = []
     for year in range(1, horizon + 1):
         if year <= 5:
-            # Interpolate across the 4 steps between year 1 and year 5.
-            fraction = (year - 1) / 4
-            rates.append(year_1_growth + (year_5_growth - year_1_growth) * fraction)
+            rates.append(_years_1_to_5(year_1_growth, year_5_growth, explicit, year))
         else:
             # Interpolate across the remaining steps between year 5 and the horizon.
-            steps = horizon - 5
-            fraction = (year - 5) / steps
-            rates.append(year_5_growth + (terminal_growth - year_5_growth) * fraction)
+            fraction = (year - 5) / (horizon - 5)
+            rates.append(fifth + (terminal_growth - fifth) * fraction)
     return rates
+
+
+def margin_schedule(
+    year_1_margin: float,
+    year_5_margin: float,
+    horizon: int,
+    explicit: list[float] | None = None,
+) -> list[float]:
+    """Operating margin for each forecast year.
+
+    Years 1-5 glide from `year_1_margin` to `year_5_margin`, or come verbatim from
+    `explicit`. Beyond year 5 the margin holds flat at the year-5 level: unlike
+    growth, a margin has no natural long-run anchor to converge on, so holding it
+    is the neutral assumption.
+    """
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1 year")
+    if explicit is not None and len(explicit) != 5:
+        raise ValueError("explicit operating margins must cover exactly years 1-5")
+
+    fifth = explicit[4] if explicit is not None else year_5_margin
+
+    margins = []
+    for year in range(1, horizon + 1):
+        if year <= 5:
+            margins.append(_years_1_to_5(year_1_margin, year_5_margin, explicit, year))
+        else:
+            margins.append(fifth)
+    return margins
 
 
 def run_dcf(
     revenue: float = NVDA_DEFAULTS["revenue"],
     year_1_growth: float = 0.50,
     year_5_growth: float = 0.15,
+    growth_rates: list[float] | None = None,
+    year_1_margin: float = 0.624,
+    year_5_margin: float = 0.55,
+    operating_margins: list[float] | None = None,
     terminal_growth: float = 0.03,
-    gross_margin: float = 0.75,
-    opex_pct: float = 0.25,
     tax_rate: float = 0.15,
+    net_capex_pct: float = 0.015,
+    nwc_pct_of_growth: float = 0.10,
     wacc: float = 0.10,
     horizon: int = 10,
-    fcf_conversion: float = 0.90,
     cash: float = NVDA_DEFAULTS["cash"],
     debt: float = NVDA_DEFAULTS["debt"],
     shares: float = NVDA_DEFAULTS["shares"],
@@ -98,7 +146,9 @@ def run_dcf(
 ) -> DCFResult:
     """Value the company and return the full year-by-year build-up.
 
-    Growth, margin, tax and WACC inputs are decimals (0.10 == 10%).
+    Growth, margin, tax and WACC inputs are decimals (0.10 == 10%). Pass
+    `growth_rates` / `operating_margins` (5-element lists) to set years 1-5
+    directly instead of tapering between a year-1 and year-5 value.
     """
     if wacc <= terminal_growth:
         raise ValueError(
@@ -108,17 +158,21 @@ def run_dcf(
     if shares <= 0:
         raise ValueError("shares outstanding must be positive")
 
-    rates = growth_schedule(year_1_growth, year_5_growth, terminal_growth, horizon)
+    rates = growth_schedule(year_1_growth, year_5_growth, terminal_growth,
+                            horizon, growth_rates)
+    margins = margin_schedule(year_1_margin, year_5_margin, horizon, operating_margins)
 
     rows: list[YearRow] = []
     prior_revenue = revenue
-    for year, growth in enumerate(rates, start=1):
+    for year, (growth, margin) in enumerate(zip(rates, margins), start=1):
         rev = prior_revenue * (1 + growth)
-        gross_profit = rev * gross_margin
-        opex = rev * opex_pct
-        operating_income = gross_profit - opex
+        operating_income = rev * margin
         nopat = operating_income * (1 - tax_rate)
-        fcf = nopat * fcf_conversion
+        net_capex = rev * net_capex_pct
+        # Working capital is funded out of *incremental* revenue, so it fades to
+        # nothing as growth slows -- which is what the perpetuity below assumes.
+        change_in_nwc = (rev - prior_revenue) * nwc_pct_of_growth
+        fcf = nopat - net_capex - change_in_nwc
         discount_factor = 1 / (1 + wacc) ** year
 
         rows.append(
@@ -126,10 +180,11 @@ def run_dcf(
                 year=year,
                 growth_rate=growth,
                 revenue=rev,
-                gross_profit=gross_profit,
-                opex=opex,
+                operating_margin=margin,
                 operating_income=operating_income,
                 nopat=nopat,
+                net_capex=net_capex,
+                change_in_nwc=change_in_nwc,
                 free_cash_flow=fcf,
                 discount_factor=discount_factor,
                 pv_of_fcf=fcf * discount_factor,
