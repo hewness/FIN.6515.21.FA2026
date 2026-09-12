@@ -390,6 +390,83 @@ html:not(.dark) .hm-sw { background: var(--bg-l); }
 html:not(.dark) .hm-cell.hm-cell.hm-cell,
 html:not(.dark) .hm-cell.hm-cell.hm-cell .hm-v,
 html:not(.dark) .hm-cell.hm-cell.hm-cell .hm-u { color: var(--ink-l); }
+
+/* --- tabs: a segmented control, so the active view is unmistakable -----------
+   Gradio's default marks the active tab with accent-coloured text and a 2px
+   underline, which reads as decoration rather than as a control -- easy to miss
+   when the panel beside it is dense with numbers.
+
+   These rules turn the tab strip into a recessed trough holding one raised pill,
+   which is the same language the rest of the app already uses for cards: a 1px
+   --border-color-primary edge, a 10px radius, and --background-fill-secondary.
+
+   Selectors are keyed to ARIA roles and Gradio's semantic class names, never to
+   its `svelte-<hash>` classes, which change on every Gradio release. Two details
+   that make the role necessary rather than decorative: Gradio renders a second,
+   `visually-hidden` .tab-container as a measuring clone (no role), and its
+   stepper component puts role="tablist" on .stepper-container. Keying on both
+   the class and the role hits the real tab strip and nothing else.
+
+   Attribute selectors are repeated to raise specificity above Gradio's own
+   `.tab-container.svelte-<hash>` (0,2,0) and `.selected.svelte-<hash>` (0,2,0)
+   rules -- the same problem, and the same remedy, as the heatmap ink above. */
+
+/* The strip. Gradio pins it to --size-8 and clips it, which would crop the pill. */
+div.tab-wrapper.tab-wrapper { height: auto; padding-bottom: 0; }
+.tab-container[role="tablist"][role="tablist"] {
+  height: auto;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 10px;
+  background: var(--background-fill-secondary);
+}
+/* the 1px hairline the trough replaces */
+.tab-container[role="tablist"][role="tablist"]::after { display: none; }
+
+.tab-container[role="tablist"] [role="tab"] {
+  height: auto;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-weight: 600;
+  font-size: 0.88rem;
+  letter-spacing: .005em;
+  color: var(--body-text-color-subdued);
+  transition: background-color .15s ease-out, color .15s ease-out;
+}
+.tab-container[role="tablist"] [role="tab"]:hover:not(.selected) {
+  background: var(--background-fill-primary);
+  color: var(--body-text-color);
+}
+/* The active pill: lifted out of the trough, bordered, and in full-strength ink
+   against subdued neighbours. Three signals, so it survives greyscale and does
+   not depend on hue alone. */
+.tab-container[role="tablist"] [role="tab"].selected {
+  background: var(--background-fill-primary);
+  border-color: var(--border-color-primary);
+  color: var(--body-text-color);
+  font-weight: 680;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .07);
+}
+.tab-container[role="tablist"] [role="tab"].selected::after { display: none; }
+
+/* Nested tabs -- the five views inside a Bear/Base/Bull case -- stay subordinate,
+   or two equally loud strips stack and the hierarchy is lost. Same shape, no
+   trough of its own, and the pill lifts only to the secondary fill. */
+[role="tabpanel"] .tab-container[role="tablist"][role="tablist"] {
+  border-color: transparent;
+  background: transparent;
+  padding: 2px 0;
+}
+[role="tabpanel"] .tab-container[role="tablist"] [role="tab"] {
+  padding: 5px 11px;
+  font-size: 0.82rem;
+}
+[role="tabpanel"] .tab-container[role="tablist"] [role="tab"].selected {
+  background: var(--background-fill-secondary);
+  box-shadow: none;
+}
 """
 
 

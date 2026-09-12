@@ -664,12 +664,19 @@ def _specificity(selector):
     """(ids, classes, elements) for a CSS selector, per the cascade spec."""
     inside_not = " ".join(re.findall(r":not\(([^)]*)\)", selector))
     bare = re.sub(r":not\([^)]*\)", " ", selector)
+    # Pseudo-ELEMENTS count at element level, pseudo-CLASSES (:hover) at class level.
+    # Pull the former out first, or the latter's pattern claims them. The four legacy
+    # single-colon spellings still count as elements, and Gradio's compiled CSS uses
+    # `:after` -- so missing them would misjudge the very rules we compare against.
+    pseudo_element = r"::[\w-]+|:(?:after|before|first-line|first-letter)\b"
+    pseudo_elements = len(re.findall(pseudo_element, bare))
+    bare = re.sub(pseudo_element, " ", bare)
     ids = len(re.findall(r"#[\w-]+", bare)) + len(re.findall(r"#[\w-]+", inside_not))
     classes = (len(re.findall(r"\.[\w-]+|\[[^\]]+\]", bare))
                + len(re.findall(r"\.[\w-]+|\[[^\]]+\]", inside_not))
-               + len(re.findall(r":(?!not\b)[\w-]+", bare)))
+               + len(re.findall(r":[\w-]+", bare)))
     stripped = re.sub(r"\.[\w-]+|#[\w-]+|:[\w-]+|\[[^\]]+\]", " ", bare)
-    elements = len(re.findall(r"[a-zA-Z][\w-]*", stripped))
+    elements = len(re.findall(r"[a-zA-Z][\w-]*", stripped)) + pseudo_elements
     return (ids, classes, elements)
 
 
@@ -703,6 +710,10 @@ def test_specificity_helper_agrees_with_the_cascade_rules():
     # :not() contributes its argument's specificity, not its own
     assert _specificity("html:not(.dark) .hm-cell") == (0, 2, 1)
     assert _specificity(".gradio-container-6-26-0 .prose *") == PROSE_STAR_SPECIFICITY
+    # a pseudo-element scores as an element, a pseudo-class as a class
+    assert _specificity(".a::after") == (0, 1, 1)
+    assert _specificity(".a:hover") == (0, 2, 0)
+    assert _specificity(".tab-container.svelte-11gaq1:after") == (0, 2, 1)
 
 
 def test_ink_on_custom_backgrounds_outranks_the_theme():
@@ -742,3 +753,65 @@ def test_every_heatmap_band_is_legible_against_its_own_cell():
                 f"{mode} band {i}: ink {ink} on {bg} separates by only {gap:.2f} in "
                 f"OKLab lightness"
             )
+
+
+# --- tab styling ---------------------------------------------------------------
+
+#: What Gradio's own tab rules score. Its component styles are `.tab-container` /
+#: `.selected` paired with a `svelte-<hash>` class, i.e. two classes.
+GRADIO_TAB_SPECIFICITY = (0, 2, 0)
+
+
+def _tab_rules():
+    css = re.sub(r"/\*.*?\*/", " ", app.CSS, flags=re.S)
+    for raw_sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        selector = " ".join(raw_sel.split())
+        if selector and ("tab-container" in selector or "tab-wrapper" in selector):
+            yield selector, body
+
+
+def test_tab_rules_outrank_gradios_own_component_styles():
+    """Same failure mode as the heatmap ink: a tie is decided by source order."""
+    rules = list(_tab_rules())
+    assert rules, "no tab styling found"
+    for selector, _ in rules:
+        assert _specificity(selector) > GRADIO_TAB_SPECIFICITY, (
+            f"`{selector}` scores {_specificity(selector)}, which does not beat "
+            f"Gradio's own tab rules at {GRADIO_TAB_SPECIFICITY}"
+        )
+
+
+def test_tab_rules_never_key_on_a_svelte_hash():
+    """Those class names change on every Gradio release, so styling must not use them."""
+    assert not re.search(r"svelte-[a-z0-9]+", app.CSS), \
+        "a svelte hash in our CSS will silently stop matching on the next upgrade"
+
+
+def test_tab_selectors_require_both_the_class_and_the_role():
+    """Gradio renders decoys that a looser selector would hit.
+
+    A `visually-hidden` .tab-container is rendered as a measuring clone (it carries
+    no role), and the stepper component puts role="tablist" on .stepper-container.
+    Pairing the class with the role excludes both.
+    """
+    for selector, _ in _tab_rules():
+        if "tab-container" in selector:
+            assert '[role="tablist"]' in selector, selector
+        assert "stepper" not in selector
+
+
+def test_the_active_tab_is_marked_by_more_than_colour():
+    """Greyscale and colour-vision safety: hue alone must not carry the state."""
+    selected = [body for sel, body in _tab_rules() if ".selected" in sel]
+    assert selected, "no rule styles the active tab"
+    combined = " ".join(selected)
+    for signal in ("background", "border-color", "font-weight"):
+        assert signal in combined, f"the active tab does not differ by {signal}"
+
+
+def test_nested_case_tabs_stay_subordinate_to_the_outer_strip():
+    """Two equally loud tab strips stacked would lose the hierarchy."""
+    nested = [(s, b) for s, b in _tab_rules() if '[role="tabpanel"]' in s]
+    assert nested, "nested tabs are not distinguished from the outer strip"
+    # the nested strip drops the trough that the outer one draws
+    assert any("transparent" in b for _, b in nested)
