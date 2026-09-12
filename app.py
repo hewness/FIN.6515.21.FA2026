@@ -259,7 +259,8 @@ html:not(.dark) .wf-bar { fill: var(--c-l); }
        background: var(--background-fill-secondary); }
 .rec-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em;
              opacity: .6; margin-bottom: 6px; }
-.rec-verdict { font-size: 1.7rem; font-weight: 700; color: var(--rec); line-height: 1.1; }
+.rec-verdict { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+.rec-verdict.rec-verdict.rec-verdict { color: var(--rec); }   /* tripled: see the heatmap note */
 .rec-conv { font-size: 0.95rem; font-weight: 550; color: var(--body-text-color-subdued); }
 .rec-range { font-size: 0.95rem; margin-top: 8px; }
 .rec-mass { font-size: 0.85rem; color: var(--body-text-color-subdued); margin-top: 4px; }
@@ -309,9 +310,13 @@ html:not(.dark) { --c-dumb: #2a78d6; }
           background: var(--border-color-primary); }
 .sp-seg { display: flex; align-items: center; justify-content: center;
           background: var(--c-l); min-width: 0; }
-.sp-seg-l { font-size: 0.72rem; font-weight: 600; color: var(--ink-l);
+/* Ink tripled for the same reason as the heatmap cells -- see the note there. The
+   Base segment is a light grey, so losing its ink to a dark theme's body colour
+   would put white text on a near-white segment. */
+.sp-seg-l { font-size: 0.72rem; font-weight: 600;
             white-space: nowrap; overflow: hidden; padding: 0 4px;
             letter-spacing: .01em; }
+.sp-seg-l.sp-seg-l.sp-seg-l { color: var(--ink-l); }
 .sp-note { font-size: 0.8rem; color: var(--body-text-color-subdued);
            margin: 8px 0 0; line-height: 1.5; }
 .sp-partial { color: #d97706; font-weight: 600; }
@@ -319,14 +324,14 @@ html:not(.dark) { --c-dumb: #2a78d6; }
 @media (prefers-color-scheme: dark) {
   .sp-bar-r { fill: var(--c-d); }
   .sp-seg { background: var(--c-d); }
-  .sp-seg-l { color: var(--ink-d); }
+  .sp-seg-l.sp-seg-l.sp-seg-l { color: var(--ink-d); }
 }
 .dark .sp-bar-r { fill: var(--c-d); }
 .dark .sp-seg { background: var(--c-d); }
-.dark .sp-seg-l { color: var(--ink-d); }
+.dark .sp-seg-l.sp-seg-l.sp-seg-l { color: var(--ink-d); }
 html:not(.dark) .sp-bar-r { fill: var(--c-l); }
 html:not(.dark) .sp-seg { background: var(--c-l); }
-html:not(.dark) .sp-seg-l { color: var(--ink-l); }
+html:not(.dark) .sp-seg-l.sp-seg-l.sp-seg-l { color: var(--ink-l); }
 
 /* --- sensitivity heatmap --- */
 .hm-scroll { overflow-x: auto; }
@@ -338,8 +343,7 @@ html:not(.dark) .sp-seg-l { color: var(--ink-l); }
 .hm-corner { text-align: left; font-size: 0.72rem; }
 .hm-rh { text-align: right; font-variant-numeric: tabular-nums; }
 .hm-cell { text-align: center; padding: 9px 6px; border-radius: 5px; min-width: 62px;
-           line-height: 1.2; cursor: default;
-           background: var(--bg-l); color: var(--ink-l); }
+           line-height: 1.2; cursor: default; background: var(--bg-l); }
 .hm-v { display: block; font-size: 0.95rem; font-weight: 620;
         font-variant-numeric: tabular-nums; }
 .hm-u { display: block; font-size: 0.72rem; opacity: .78;
@@ -352,13 +356,40 @@ html:not(.dark) .sp-seg-l { color: var(--ink-l); }
          font-variant-numeric: tabular-nums; }
 
 @media (prefers-color-scheme: dark) {
-  .hm-cell { background: var(--bg-d); color: var(--ink-d); }
+  .hm-cell { background: var(--bg-d); }
   .hm-sw { background: var(--bg-d); }
 }
-.dark .hm-cell { background: var(--bg-d); color: var(--ink-d); }
+.dark .hm-cell { background: var(--bg-d); }
 .dark .hm-sw { background: var(--bg-d); }
-html:not(.dark) .hm-cell { background: var(--bg-l); color: var(--ink-l); }
+html:not(.dark) .hm-cell { background: var(--bg-l); }
 html:not(.dark) .hm-sw { background: var(--bg-l); }
+
+/* Ink is set separately, and at doubled specificity, because Gradio ships
+       .gradio-container-<version> .prose * { color: var(--body-text-color) }
+   That is a (0,2,0) rule which sets `color` DIRECTLY on every descendant of a gr.HTML.
+   It outranks any single-class rule of ours, and because it paints the descendants
+   directly it also defeats inheritance from the cell -- so the <span>s carrying the
+   value and the upside took the theme's body colour instead of the ink chosen to suit
+   their own cell. At the diverging ramp's neutral step the cell is near-white, so in a
+   dark theme that meant white text on a white cell.
+
+   Tripling the class buys the specificity back without !important and without depending
+   on Gradio's version-stamped container class. Every variant is tripled equally, so the
+   light/dark cascade keeps exactly the order it had. */
+.hm-cell.hm-cell.hm-cell,
+.hm-cell.hm-cell.hm-cell .hm-v,
+.hm-cell.hm-cell.hm-cell .hm-u { color: var(--ink-l); }
+@media (prefers-color-scheme: dark) {
+  .hm-cell.hm-cell.hm-cell,
+  .hm-cell.hm-cell.hm-cell .hm-v,
+  .hm-cell.hm-cell.hm-cell .hm-u { color: var(--ink-d); }
+}
+.dark .hm-cell.hm-cell.hm-cell,
+.dark .hm-cell.hm-cell.hm-cell .hm-v,
+.dark .hm-cell.hm-cell.hm-cell .hm-u { color: var(--ink-d); }
+html:not(.dark) .hm-cell.hm-cell.hm-cell,
+html:not(.dark) .hm-cell.hm-cell.hm-cell .hm-v,
+html:not(.dark) .hm-cell.hm-cell.hm-cell .hm-u { color: var(--ink-l); }
 """
 
 

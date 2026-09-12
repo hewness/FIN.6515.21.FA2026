@@ -644,3 +644,101 @@ def test_a_flagged_case_is_marked_in_the_scenario_table():
 
     clean, _ = _scenario()
     assert 'class="case-flag"' not in clean
+
+
+# --- ink must outrank Gradio's own text colour --------------------------------
+
+#: Gradio ships `.gradio-container-<version> .prose * { color: var(--body-text-color) }`.
+#: The universal selector sets `color` directly on every descendant of a `gr.HTML`, so it
+#: beats both a single-class rule and inheritance from a parent. Anything of ours that
+#: picks ink to suit its own background has to outrank it or the theme repaints the text.
+PROSE_STAR_SPECIFICITY = (0, 2, 0)
+
+#: Elements whose text sits on a background *we* choose, so the ink is not decorative --
+#: if the theme repaints it the text can vanish entirely. At the diverging ramp's neutral
+#: step the heatmap cell is near-white, which is exactly where this was first seen.
+INK_ON_CUSTOM_BACKGROUND = ("hm-cell", "hm-v", "hm-u", "sp-seg-l")
+
+
+def _specificity(selector):
+    """(ids, classes, elements) for a CSS selector, per the cascade spec."""
+    inside_not = " ".join(re.findall(r":not\(([^)]*)\)", selector))
+    bare = re.sub(r":not\([^)]*\)", " ", selector)
+    ids = len(re.findall(r"#[\w-]+", bare)) + len(re.findall(r"#[\w-]+", inside_not))
+    classes = (len(re.findall(r"\.[\w-]+|\[[^\]]+\]", bare))
+               + len(re.findall(r"\.[\w-]+|\[[^\]]+\]", inside_not))
+               + len(re.findall(r":(?!not\b)[\w-]+", bare)))
+    stripped = re.sub(r"\.[\w-]+|#[\w-]+|:[\w-]+|\[[^\]]+\]", " ", bare)
+    elements = len(re.findall(r"[a-zA-Z][\w-]*", stripped))
+    return (ids, classes, elements)
+
+
+def _colour_rules():
+    """Every (selector, declarations) pair in the app's CSS that sets `color`.
+
+    Comments are stripped first and the whole selector list is kept: a multi-line list
+    like `.a,
+.a .b,
+.a .c { ... }` must yield all three, or a guard built on this
+    silently checks only the last one.
+    """
+    css = re.sub(r"/\*.*?\*/", " ", app.CSS, flags=re.S)
+    for raw_sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        selector = " ".join(raw_sel.split())
+        if not selector or selector.startswith("@"):
+            continue
+        if not re.search(r"(?:^|;|\s)color\s*:", body):
+            continue
+        for one in (s.strip() for s in selector.split(",")):
+            if one:
+                yield one, body
+
+
+def test_specificity_helper_agrees_with_the_cascade_rules():
+    """The guard below is only as good as this; pin it on known answers."""
+    assert _specificity(".hm-cell") == (0, 1, 0)
+    assert _specificity(".hm-cell.hm-cell") == (0, 2, 0)
+    assert _specificity(".hm-cell.hm-cell .hm-v") == (0, 3, 0)
+    assert _specificity(".dark .hm-cell.hm-cell") == (0, 3, 0)
+    # :not() contributes its argument's specificity, not its own
+    assert _specificity("html:not(.dark) .hm-cell") == (0, 2, 1)
+    assert _specificity(".gradio-container-6-26-0 .prose *") == PROSE_STAR_SPECIFICITY
+
+
+def test_ink_on_custom_backgrounds_outranks_the_theme():
+    """The regression guard for white-on-white heatmap cells.
+
+    Every rule that inks an element sitting on one of our own backgrounds must beat
+    `.prose *`, in every one of its light/dark variants -- a single variant left at one
+    class is enough to hand that branch of the cascade back to the theme.
+    """
+    seen = {name: 0 for name in INK_ON_CUSTOM_BACKGROUND}
+    for selector, _ in _colour_rules():
+        for name in INK_ON_CUSTOM_BACKGROUND:
+            if re.search(rf"\.{name}\b", selector):
+                seen[name] += 1
+                assert _specificity(selector) > PROSE_STAR_SPECIFICITY, (
+                    f"`{selector}` sets ink on a background we choose but only scores "
+                    f"{_specificity(selector)}, so Gradio's .prose * ({PROSE_STAR_SPECIFICITY}) "
+                    f"repaints it with the theme's body colour"
+                )
+    for name, count in seen.items():
+        assert count >= 2, f".{name} needs a light and a dark ink rule, found {count}"
+
+
+def test_every_heatmap_band_is_legible_against_its_own_cell():
+    """Ink is chosen per band; check the choice actually separates from the background.
+
+    The neutral 'fair' band is the one that bit us: a near-white cell in light mode and a
+    dark grey one in dark mode, so a single hardcoded ink cannot serve both.
+    """
+    from viz import diverging_ramp, hex_to_oklab, ink_for
+
+    for mode in ("light", "dark"):
+        for i, bg in enumerate(diverging_ramp(mode)):
+            ink = ink_for(bg, mode)
+            gap = abs(hex_to_oklab(bg)[0] - hex_to_oklab(ink)[0])
+            assert gap > 0.35, (
+                f"{mode} band {i}: ink {ink} on {bg} separates by only {gap:.2f} in "
+                f"OKLab lightness"
+            )

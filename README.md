@@ -52,7 +52,7 @@ math and every chart are hand-rolled, so there is no numpy, pandas or plotly to 
 .venv\Scripts\python.exe -m pytest
 ```
 
-132 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+135 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -67,6 +67,11 @@ would leave an app that still runs and still prints a plausible number:
   asserts the component list and the handler signature stay in lockstep by label.
 - **A table that disagrees with the engine.** The projection table's rendered cells are
   parsed back out of the HTML and compared, exactly, against a direct `run_dcf()` call.
+- **Text the theme repaints.** Gradio sets `color` on every descendant of a `gr.HTML`
+  via `.prose *`, which outranks a single-class rule. Anything of ours that picks ink to
+  suit its own background is checked for enough specificity to survive that, in every
+  light/dark variant — the neutral heatmap cell is near-white, so losing its ink meant
+  white text on a white cell.
 - **Layout that quietly regresses.** The app opens on a visible tab, the mode toggle hides
   a whole column rather than its contents, and no tab relies on individual visibility —
   each of those was a real bug found only by opening the app, so each now has a guard.
