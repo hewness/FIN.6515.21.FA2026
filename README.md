@@ -4,6 +4,13 @@ An interactive discounted cash flow model for NVIDIA (NVDA), built with
 [Gradio](https://gradio.app). Move a slider and the valuation recomputes — no submit
 button, no spreadsheet.
 
+Every opening assumption is sourced from `NVIDIA_Exhibits.xlsx` (compiled 30 July 2026),
+valued at the **29 July 2026 close of $190.01**. That workbook is third-party coursework
+material and is **not redistributed in this repository** — place your own copy alongside
+`app.py` if you want to check a figure against it. Nothing at runtime reads it: the
+defaults it justifies are baked into `dcf.py` and `app.py`, each annotated with the
+exhibit it came from.
+
 ## Setup
 
 Requires Python 3.10+ (developed on 3.14).
@@ -24,12 +31,13 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-126 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+132 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
 discount factor, and that the parts sum to the reported totals. It also pins the
-scenario weighting and the two tiers of input validation.
+scenario weighting, the two tiers of input validation, and that every default still
+traces to the exhibit it came from.
 
 `test_app_wiring.py` covers the UI. Two failure modes get specific guards, because both
 would leave an app that still runs and still prints a plausible number:
@@ -177,7 +185,7 @@ than every projected year combined.
 
 Two details worth knowing. The net-debt bar's **label follows its sign**: NVIDIA holds
 more cash than debt, so it reads "Net cash" and adds value; a bar labelled "Net debt" that
-pushed the total up would be a lie. And that bar is only ~1% of equity value, so it is a
+pushed the total up would be a lie. And that bar is only ~2% of equity value, so it is a
 sliver — deliberately, because that thinness is true information. No broken axis, no
 second scale; the value label carries it.
 
@@ -201,33 +209,83 @@ blue is worth more, red is worth less.
 
 ## On the assumptions — read this before quoting a number
 
-The starting figures are NVIDIA's FY2025 actuals: revenue $130.5B, cash $43.2B, debt
-$8.5B, 24.5B shares, reference price $180.
+Every opening figure traces to **`NVIDIA_Exhibits.xlsx`**, compiled 30 July 2026.
+The valuation date is the **29 July 2026 close of $190.01**.
 
-Slider defaults, and what each is grounded in:
+Company figures: revenue **$215.9B** (FY2026), cash and other non-operating assets
+**$115.5B**, debt **$8.47B**, **24.22B** shares.
+
+On that cash figure: Exhibit 6 derives enterprise value as market cap *less non-operating
+assets of $115.5B*, which bundles cash, marketable debt and equity securities, and
+non-marketable stakes at book. This model uses the same $115.5B rather than the narrower
+$50.3B of cash and marketable debt, so that **the model's enterprise value and the
+market-implied enterprise value are the same construction** and can be compared directly.
+The cost is that illiquid stakes sit at book value.
 
 | Input | Default | Basis |
 |---|---|---|
-| Year 1 operating margin | 62.4% | FY2025 actual |
-| Year 5 operating margin | 55% | **Judgment** — assumes margin compression as competition arrives |
-| Net capex | 1.5% of revenue | FY2025 actual was 1.2% (capex $3.4B less D&A $1.86B on $130.5B revenue); nudged up because NVIDIA guided FY2026 capex higher. Low because NVIDIA is fabless — TSMC carries the fab spend. |
-| Working capital | 10% of revenue growth | ⚠️ **Unverified placeholder** — the one default not tied to a filing |
-| Year 1 / Year 5 revenue growth | 50% / 15% | **Judgment** |
-| Tax rate | 15% | Close to NVIDIA's ~13% effective rate |
-| WACC / terminal growth | 10% / 3% | **Judgment** — generic large-cap assumptions |
+| Year 1 operating margin | 65.6% | Ex 2 — Q1 FY2027 **actual**, and Q2 guidance (GM 74.9% ±50bp, opex ~$8.5B on $91.0B) implies 65.6% again. **Not** FY2026's 60.4%, which is depressed by a one-off gross-margin dip to 71.1%; using it would carry that through all ten forecast years. |
+| Year 5 operating margin | 55% | **Judgment** — compression as custom silicon and AMD take share |
+| Year 1 revenue growth | 82.25% | Ex 6 — consensus FY2027 revenue $393.6B against FY2026's $215.9B |
+| Year 5 revenue growth | 0.25% | Lands FY2031 revenue at $1,088B — **78% of Ex 8's $1.4T 2030 accelerator market**, inside the 75–85% share band the exhibit reports |
+| Net capex | 1.5% of revenue | Ex 5 — (capex $6,042M less D&A $2,843M) / revenue $215,938M = 1.48% |
+| Working capital | 12.8% of revenue growth | **Calibrated**, see below |
+| Tax rate | 17% | Ex 2 — guided FY2027 effective rate 16–18% |
+| WACC | 11.25% | **CAPM**: 4.7% risk-free + β × 4.23% ERP (both Ex 6) at a bottom-up semiconductor β of 1.55 |
+| Terminal growth | 3% | **Judgment**, capped at the 4.7% risk-free rate |
 
-At these defaults the app opens near **$133.70/share, −25.7%, SELL**.
+### The working-capital figure is solved for, not quoted
+
+This was the one default previously flagged as unverified. Exhibit 5 reports "working
+capital absorption 19.3%", but on a different basis than this model's *% of incremental
+revenue*. Solving instead for the value that reproduces FY2026 actual free cash flow:
+
+```
+NOPAT   130,387 × (1 − 15.1%)   = 110,699
+less net capex (6,042 − 2,843)  =   3,199
+=> implied working capital draw  =  10,925   on revenue growth of 85,441  →  12.8%
+```
+
+At 12.8% the model returns FY2026 free cash flow of **$96.60B against an actual $96.58B**.
+The same reconciliation independently confirms the 1.5% net capex figure.
+
+### Why WACC uses the bottom-up beta
+
+Exhibit 6 gives two. The five-year regression beta of **2.21** is how the stock has
+actually traded, but it bakes in a historic run; the bottom-up semiconductor beta of
+**1.35–1.75** is estimated from the industry and is the standard choice for that reason.
+Bull, Base and Bear take the low, mid and high end — **10.5% / 11.25% / 12.0%**.
+
+## What the model says at these settings
+
+| | Bear | Base | Bull |
+|---|---|---|---|
+| Year 1 growth | 64.0% | 82.25% | 95.0% |
+| *anchor* | Q2 guidance holds, then flat sequentially — 81.6 + 91.0 × 3 = $354.6B. A **floor**: going lower requires H2 below an already-guided Q2. | consensus | ahead of consensus, on Ex 8's ~$730B hyperscaler capex and ~$1T Blackwell + Rubin visibility |
+| FY2031 revenue | $718B (51% of TAM) | $1,088B (78%) | $1,316B (94%) |
+| Year 5 margin / WACC / terminal | 45% / 12.0% / 2% | 55% / 11.25% / 3% | 62% / 10.5% / 4% |
+| **Value per share** | **$94.26** (−50.4%) | **$194.91** (+2.6%) | **$315.52** (+66.1%) |
+
+Probability-weighted at the opening 25/50/25 split: **$199.90, +5.2%, HOLD at low
+conviction** — the weighted mean sits inside the HOLD band while 75% of the probability
+sits above the price, and the app reports that disagreement rather than blending it away.
 
 Three things worth knowing before you read anything into that:
 
-- **Terminal value is ~60% of enterprise value.** Most of the answer comes from one
-  formula about a year you cannot see.
-- **WACC and terminal growth dominate.** One percentage point on either moves value
-  ~13%; one point on Year-1 revenue growth moves it ~1.7%. The inputs that matter most
-  are the two nobody can observe.
-- **Margin compression does most of the rest.** Tapering the margin from 62.4% to 55% is
-  worth about $17/share on its own — far more than net capex and working capital
-  combined, which together cost about $6.
+- **The base case lands on the price, and that is the finding.** Anchoring Year 1 on
+  consensus and discounting at CAPM produces $194.91 against a $190.01 close — a 2.6% gap.
+  The model's enterprise value of $4,614B against the market-implied $4,487B says the same
+  thing. **The market is priced roughly for consensus.** So the argument about NVIDIA is
+  not about the level; it is about the *shape of the deceleration curve* — which is exactly
+  what the Year-1-to-Year-5 taper lets you argue with.
+- **No single driver has to do anything heroic.** Every break-even sits within about 1.5
+  percentage points of its own opening setting, and all five read *defensible*. Contrast
+  the sell-side: at Exhibit 6's **$302.83** consensus target, the required Year-5 margin
+  (93%) exceeds the gross margin, terminal growth cannot reach it at all, and both growth
+  routes imply more revenue than the entire industry is forecast to reach.
+- **Terminal value is still roughly half of enterprise value**, and one point on WACC or
+  terminal growth moves the answer far more than one point on Year-1 growth. The inputs
+  that matter most remain the two nobody can observe.
 
 Treat the output as a tool for testing which assumptions a price implies, not as a price
 target.

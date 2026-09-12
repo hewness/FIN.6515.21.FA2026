@@ -14,19 +14,46 @@ from dataclasses import asdict, dataclass, field
 MAX_TERMINAL_MULTIPLE = 100.0      # beyond this it is arithmetic, not a valuation
 HIGH_TERMINAL_MULTIPLE = 40.0      # beyond this, worth saying out loud
 
-# Margin defaults, named so the sensitivity axis can rebuild the taper from them
-# rather than duplicating the literals.
-DEFAULT_YEAR_1_MARGIN = 0.624
-DEFAULT_YEAR_5_MARGIN = 0.55
+# Year 1 is close to known -- Q1 FY2027 is banked and Q2 is guided -- so the Year-1
+# margin is an observation, not a forecast. FY2026's full-year 60.4% is NOT the figure
+# to use: it is depressed by a gross-margin dip to 71.1% against 75.0% the year before.
+# Q1 FY2027 came in at 74.9% gross / 65.6% operating, and Q2 guidance (GM 74.9% +/-50bp,
+# opex ~$8.5B on $91.0B revenue) implies 65.6% again. Using FY2026 would carry a one-off
+# through all ten forecast years.
+DEFAULT_YEAR_1_MARGIN = 0.656   # Ex 2: Q1 FY2027 actual, matched by Q2 FY2027 guidance
+DEFAULT_YEAR_5_MARGIN = 0.55    # judgment: compression as custom silicon and AMD arrive
 
-# NVIDIA starting figures (FY2025 actuals, $B except shares and price).
+# NVIDIA starting figures ($B except shares and price), from NVIDIA_Exhibits.xlsx,
+# compiled 30 July 2026. Valuation date 29 July 2026.
 NVDA_DEFAULTS = {
-    "revenue": 130.5,
-    "cash": 43.2,
-    "debt": 8.5,
-    "shares": 24.5,
-    "current_price": 180.0,
+    "revenue": 215.9,        # Ex 1, FY2026 revenue $215,938M
+    "cash": 115.5,           # Ex 4/6, ALL non-operating assets -- see the note below
+    "debt": 8.47,            # Ex 4, total debt $8,470M
+    "shares": 24.22,         # Ex 6, shares outstanding 24.22B
+    "current_price": 190.01, # Ex 6, close 29 July 2026
 }
+# On `cash`: Exhibit 6 backs out enterprise value as market cap less non-operating
+# assets of $115.5B, which bundles cash, marketable debt AND equity securities, and
+# non-marketable stakes carried at book. Using the same $115.5B here rather than the
+# narrower $50.3B (cash + marketable debt) is deliberate: it makes this model's
+# enterprise value and the market-implied enterprise value the same construction, so
+# the two are directly comparable. The cost is that illiquid stakes sit at book value.
+
+# CAPM inputs, all from Ex 6. Every WACC default in the app is built from these rather
+# than typed as a literal, so the three cases cannot drift from the stated beta range.
+RISK_FREE = 0.047               # Ex 6, 10-year US Treasury
+EQUITY_RISK_PREMIUM = 0.0423    # Ex 6, implied ERP
+# Ex 6 gives two betas. The 5-year regression beta is 2.21, which is how the stock has
+# actually traded but bakes in a historic run; the bottom-up semiconductor beta of
+# 1.35-1.75 is estimated from the industry and is the standard choice for exactly that
+# reason. Bull / Base / Bear take the low / mid / high end.
+BOTTOM_UP_BETA = (1.35, 1.55, 1.75)
+CONSENSUS_TARGET = 302.83       # Ex 6, mean price target across 61 analysts
+
+
+def capm_wacc(beta: float) -> float:
+    """Risk-free + beta x equity risk premium, rounded to the WACC slider's 0.25% step."""
+    return round((RISK_FREE + beta * EQUITY_RISK_PREMIUM) * 400) / 400
 
 
 @dataclass
@@ -178,17 +205,17 @@ def margin_schedule(
 
 def run_dcf(
     revenue: float = NVDA_DEFAULTS["revenue"],
-    year_1_growth: float = 0.50,
-    year_5_growth: float = 0.15,
+    year_1_growth: float = 0.8225,   # Ex 6: consensus FY2027 revenue $393.6B
+    year_5_growth: float = 0.0025,   # lands FY2031 at 78% of Ex 8's 2030 accelerator TAM
     growth_rates: list[float] | None = None,
     year_1_margin: float = DEFAULT_YEAR_1_MARGIN,
     year_5_margin: float = DEFAULT_YEAR_5_MARGIN,
     operating_margins: list[float] | None = None,
     terminal_growth: float = 0.03,
-    tax_rate: float = 0.15,
-    net_capex_pct: float = 0.015,
-    nwc_pct_of_growth: float = 0.10,
-    wacc: float = 0.10,
+    tax_rate: float = 0.17,          # Ex 2: guided FY2027 effective rate 16-18%
+    net_capex_pct: float = 0.015,    # Ex 5: (capex 6,042 - D&A 2,843) / revenue 215,938
+    nwc_pct_of_growth: float = 0.128,  # calibrated to FY2026 actual FCF -- see note below
+    wacc: float = 0.1125,            # CAPM at the mid bottom-up beta of 1.55
     horizon: int = 10,
     cash: float = NVDA_DEFAULTS["cash"],
     debt: float = NVDA_DEFAULTS["debt"],
@@ -231,6 +258,13 @@ def run_dcf(
         net_capex = rev * net_capex_pct
         # Working capital is funded out of *incremental* revenue, so it fades to
         # nothing as growth slows -- which is what the perpetuity below assumes.
+        # Working capital is absorbed by *incremental* revenue, not by the level of it.
+        # The 12.8% default is calibrated rather than quoted: Ex 5 reports "working
+        # capital absorption 19.3%", but that is computed on a different basis than this
+        # model uses. Solving instead for the figure that reproduces FY2026 actual free
+        # cash flow -- NOPAT 110,699 less net capex 3,199 less X = FCF 96,575 -- gives
+        # X = 10,925 on revenue growth of 85,441, i.e. 12.8%. At that value the model
+        # returns FY2026 FCF of $96.60B against an actual $96.58B.
         change_in_nwc = (rev - prior_revenue) * nwc_pct_of_growth
         fcf = nopat - net_capex - change_in_nwc
         discount_factor = 1 / (1 + wacc) ** year
@@ -494,10 +528,21 @@ def weighted_valuation(
 # that are SUBSTANTIVE rather than "is it inside the slider range" -- every
 # required value below sits inside its slider range, so range membership tests
 # nothing. Each threshold carries its basis so the judgment is auditable.
-NVDA_GROSS_MARGIN = 0.75        # FY2025 actual; an operating margin cannot exceed it
-MAX_TERMINAL_GROWTH = 0.04      # long-run nominal GDP; above this forever is not a forecast
-MIN_CREDIBLE_WACC = 0.07        # below this is hard to defend given customer concentration
-GLOBAL_SEMI_REVENUE = 792.0     # $B, 2025 industry total (SIA / Gartner)
+# Ex 2: Q1 FY2027 actual 74.9%, Q2 FY2027 guidance 74.9% +/-50bp. NOT FY2026's 71.1%,
+# which is the one-off year; the current run-rate is back at 75%.
+NVDA_GROSS_MARGIN = 0.75
+# Ex 6: the 10-year US Treasury. A perpetual growth rate above the risk-free rate is the
+# standard ceiling -- nothing grows faster than the economy forever.
+MAX_TERMINAL_GROWTH = RISK_FREE
+# Risk-free + ERP at a beta of 1.0. A semiconductor business cannot credibly be less
+# risky than the market, so this is the floor the CAPM build-up itself implies.
+MIN_CREDIBLE_WACC = round(RISK_FREE + EQUITY_RISK_PREMIUM, 4)
+# Ex 8's furthest-out industry total: calendar 2027 forecast ~$1.9T (2025 was ~$795B,
+# 2026F $1.51T). Still conservative as a ceiling on FY2036 revenue, which is the year
+# this is compared against -- but it is the last year the exhibit sizes. The old 2025
+# figure was a full decade adrift of the year it judged, and flagged the base case's
+# own growth rate as demanding.
+GLOBAL_SEMI_REVENUE = 1900.0
 
 IMPOSSIBLE, DEMANDING, DEFENSIBLE = "impossible", "demanding", "defensible"
 
@@ -603,7 +648,7 @@ def _judge(key: str, required: float, assumptions: dict) -> tuple[str, str]:
     """Is this required value something a reasonable analyst could believe?"""
     if key == "year_5_margin" and required > NVDA_GROSS_MARGIN:
         return IMPOSSIBLE, (
-            "an operating margin cannot exceed the gross margin; NVIDIA's FY2025 "
+            "an operating margin cannot exceed the gross margin; NVIDIA's Q1 FY2027 "
             f"gross margin was {NVDA_GROSS_MARGIN:.0%}"
         )
     if key == "terminal_growth" and required > MAX_TERMINAL_GROWTH:
@@ -618,7 +663,8 @@ def _judge(key: str, required: float, assumptions: dict) -> tuple[str, str]:
         if implied > GLOBAL_SEMI_REVENUE:
             return DEMANDING, (
                 f"implies ${implied:,.0f}B of final-year revenue, more than the entire "
-                f"2025 global semiconductor industry (${GLOBAL_SEMI_REVENUE:,.0f}B)"
+                f"global semiconductor industry is forecast to reach in 2027 "
+                f"(${GLOBAL_SEMI_REVENUE:,.0f}B)"
             )
     return DEFENSIBLE, "within the range of reasonable disagreement"
 

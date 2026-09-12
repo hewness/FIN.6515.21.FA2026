@@ -4,3 +4,6 @@ __pycache__/
 .gradio/
 server.log
 .pytest_cache/
+
+# Source workbook: third-party coursework material, not redistributed here.
+NVIDIA_Exhibits.xlsx

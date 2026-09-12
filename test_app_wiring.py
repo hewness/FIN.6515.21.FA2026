@@ -51,10 +51,22 @@ def test_per_year_defaults_reproduce_the_taper():
     """
     from dcf import growth_schedule, margin_schedule
 
-    taper_growth = growth_schedule(50, 15, 3, horizon=10)[:5]
-    taper_margin = margin_schedule(62.4, 55, horizon=10)[:5]
-    assert app.GROWTH_BY_YEAR == taper_growth
-    assert app.MARGIN_BY_YEAR == taper_margin
+    for name, d in (("Base", app.BASE_DEFAULTS), ("Bear", app.BEAR_DEFAULTS),
+                    ("Bull", app.BULL_DEFAULTS)):
+        growth, margins = app.per_year_defaults(d)
+        assert growth == growth_schedule(d["y1_growth"], d["y5_growth"],
+                                         d["terminal"], horizon=10)[:5], name
+        assert margins == margin_schedule(d["y1_margin"], d["y5_margin"],
+                                          horizon=10)[:5], name
+        # Every per-year value must land exactly on its slider's step, or the
+        # slider rounds it and the two modes stop agreeing on the screen even
+        # though they agree in the model. This is what forced the Base case's
+        # Year-5 growth to 0.25% rather than 0.00%.
+        assert all(abs(round(v / 0.25) * 0.25 - v) < 1e-9 for v in growth), name
+        assert all(abs(round(v / 0.05) * 0.05 - v) < 1e-9 for v in margins), name
+
+    assert (app.GROWTH_BY_YEAR, app.MARGIN_BY_YEAR) == app.per_year_defaults(
+        app.BASE_DEFAULTS)
 
 
 def test_valuate_feeds_every_panel():
@@ -147,7 +159,9 @@ def test_terminal_and_net_debt_rows_are_present():
     assert "Gordon Growth:</strong> terminal value" in panel
     assert "Net debt" in panel
     # NVIDIA holds net cash, so the bridge shows it parenthesised
-    assert "($34.7B)" in panel
+    from dcf import NVDA_DEFAULTS
+    net_cash = NVDA_DEFAULTS["cash"] - NVDA_DEFAULTS["debt"]
+    assert f"(${net_cash:,.1f}B)" in panel
 
 
 def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
@@ -225,7 +239,8 @@ def test_case_panels_open_on_their_own_defaults():
     base = app.case_inputs["Base"]
     bear = app.case_inputs["Bear"]
     bull = app.case_inputs["Bull"]
-    assert base[Y1G].value == app.all_inputs[Y1G].value == 50
+    assert (base[Y1G].value == app.all_inputs[Y1G].value
+            == app.BASE_DEFAULTS["y1_growth"])
     assert bear[Y1G].value == app.BEAR_DEFAULTS["y1_growth"]
     assert bull[Y1G].value == app.BULL_DEFAULTS["y1_growth"]
     assert bear[WACC].value == app.BEAR_DEFAULTS["wacc"]
@@ -261,7 +276,8 @@ def test_scenario_panel_reports_all_cases_and_the_recommendation():
         assert name in panel
     assert "Probability-weighted value" in panel
     assert 'class="rec-verdict"' in panel              # the recommendation block
-    assert "What $180 requires" in panel or "requires" in panel
+    from dcf import NVDA_DEFAULTS
+    assert f"What ${NVDA_DEFAULTS['current_price']:.0f} requires" in panel
     assert 'class="sp-bar"' in bar                     # the bar renders separately now
 
 

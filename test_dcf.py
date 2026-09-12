@@ -123,10 +123,14 @@ def test_the_two_modes_are_the_same_model():
     This is what makes the UI toggle a choice of input style rather than a
     choice between two subtly different models.
     """
+    import inspect
+    d = {k: v.default for k, v in inspect.signature(run_dcf).parameters.items()}
     taper = run_dcf()
     same = run_dcf(
-        growth_rates=growth_schedule(0.50, 0.15, 0.03, horizon=10)[:5],
-        operating_margins=margin_schedule(0.624, 0.55, horizon=10)[:5],
+        growth_rates=growth_schedule(d["year_1_growth"], d["year_5_growth"],
+                                     d["terminal_growth"], horizon=10)[:5],
+        operating_margins=margin_schedule(d["year_1_margin"], d["year_5_margin"],
+                                          horizon=10)[:5],
     )
     assert same.value_per_share == pytest.approx(taper.value_per_share)
     assert [r.free_cash_flow for r in same.rows] == pytest.approx(
@@ -426,19 +430,24 @@ def test_probability_above_price_counts_the_cases_over_it():
 # --- break-even solver and the recommendation ---
 
 from dcf import (  # noqa: E402
-    BREAK_EVEN_DRIVERS, DEFENSIBLE, DEMANDING, GLOBAL_SEMI_REVENUE, IMPOSSIBLE,
-    MAX_TERMINAL_GROWTH, MIN_CREDIBLE_WACC, NVDA_GROSS_MARGIN, _apply_axis,
-    break_even, current_setting, recommend, solve_for_target,
+    BREAK_EVEN_DRIVERS, CONSENSUS_TARGET, DEFENSIBLE, DEMANDING, GLOBAL_SEMI_REVENUE,
+    IMPOSSIBLE, MAX_TERMINAL_GROWTH, MIN_CREDIBLE_WACC, NVDA_DEFAULTS,
+    NVDA_GROSS_MARGIN, _apply_axis, break_even, current_setting, recommend,
+    solve_for_target,
 )
 
-PRICE = 180.0
+#: The valuation date price, read from the model so a re-basing cannot leave the
+#: tests asserting against a stale quote. Ex 6: close of 29 July 2026.
+PRICE = NVDA_DEFAULTS["current_price"]
 
 
 def test_solver_recovers_a_known_input():
     """Solving for the base case's own value must return the base assumption."""
+    import inspect
+    default_wacc = inspect.signature(run_dcf).parameters["wacc"].default
     base = run_dcf().value_per_share
     found = solve_for_target({}, "wacc", 0.05, 0.25, base)
-    assert found == pytest.approx(0.10, abs=1e-4)
+    assert found == pytest.approx(default_wacc, abs=1e-4)
 
 
 def test_solver_returns_none_when_the_target_is_out_of_bracket():
@@ -486,38 +495,60 @@ def test_break_even_covers_every_declared_driver():
     assert all(r.reason for r in rows)            # a verdict always carries its basis
 
 
-def test_plausibility_verdicts_fire_on_their_thresholds():
-    rows = {r.key: r for r in break_even({}, PRICE)}
+def test_every_driver_is_defensible_at_the_market_price():
+    """The headline result of re-basing on the exhibits.
 
-    # at defaults the required margin exceeds NVIDIA's gross margin -> impossible
+    The base case is anchored on consensus (Ex 6: FY2027 revenue $393.6B) and lands
+    within 3% of the 29 July 2026 close. So no single driver has to do anything
+    heroic to reach the price -- every break-even sits a hair from its own base
+    setting. The argument about NVIDIA is not about the level; it is about the shape
+    of the deceleration curve.
+    """
+    rows = {r.key: r for r in break_even({}, PRICE)}
+    assert all(r.verdict == DEFENSIBLE for r in rows.values()), {
+        k: (r.required, r.verdict) for k, r in rows.items()}
+    # and each required value sits close to where the slider already is
+    for key, row in rows.items():
+        assert abs(row.required - row.base) < 0.03, key
+
+
+def test_plausibility_verdicts_fire_on_their_thresholds():
+    """Stressed to the sell-side target, the thresholds all bite.
+
+    $302.83 is Ex 6's mean price target across 61 analysts -- a real number rather
+    than one picked to make the test pass, and the interesting finding is that no
+    single driver reaches it at a defensible level.
+    """
+    rows = {r.key: r for r in break_even({}, CONSENSUS_TARGET)}
+
+    # the required margin exceeds NVIDIA's gross margin -> impossible
     assert rows["year_5_margin"].required > NVDA_GROSS_MARGIN
     assert rows["year_5_margin"].verdict == IMPOSSIBLE
     assert "gross margin" in rows["year_5_margin"].reason
 
-    # and the required terminal growth exceeds long-run nominal GDP
-    assert rows["terminal_growth"].required > MAX_TERMINAL_GROWTH
+    # terminal growth cannot get there at all, even at the top of its bracket
+    assert rows["terminal_growth"].required is None
     assert rows["terminal_growth"].verdict == IMPOSSIBLE
 
-    # growth routes imply more revenue than the whole industry
+    # growth routes imply more revenue than the whole industry is forecast to reach
     for key in ("year_1_growth", "year_5_growth"):
         assert rows[key].verdict == DEMANDING
-        assert str(int(GLOBAL_SEMI_REVENUE)) in rows[key].reason
+        assert f"{GLOBAL_SEMI_REVENUE:,.0f}" in rows[key].reason
 
-    # the WACC route is the only defensible one here
-    assert rows["wacc"].verdict == DEFENSIBLE
-    assert rows["wacc"].required > MIN_CREDIBLE_WACC
+    # and the WACC route needs a discount rate below the CAPM floor
+    assert rows["wacc"].required < MIN_CREDIBLE_WACC
+    assert rows["wacc"].verdict == DEMANDING
 
 
 def test_verdicts_track_the_target_rather_than_telling_a_fixed_story():
     """At a cheap target the demanding routes become defensible -- or unreachable.
 
-    Terminal growth cannot get the value down to $60 even at 0% (the base is worth
-    $103 there), so that driver is correctly reported as unreachable rather than
-    given a spurious required value.
+    Terminal growth cannot get the value down to $60 even at 0%, so that driver is
+    correctly reported as unreachable rather than given a spurious required value.
     """
     rows = {r.key: r for r in break_even({}, 60.0)}
 
-    assert rows["year_5_margin"].required == pytest.approx(0.208, abs=0.01)
+    assert rows["year_5_margin"].required == pytest.approx(0.071, abs=0.01)
     assert rows["year_5_margin"].verdict == DEFENSIBLE
     assert rows["wacc"].verdict == DEFENSIBLE          # a high WACC is fine here
 
@@ -530,27 +561,36 @@ def test_verdicts_track_the_target_rather_than_telling_a_fixed_story():
 # --- the recommendation -------------------------------------------------------
 
 def _wv(cut_a, cut_b):
-    bear = dict(year_1_growth=0.25, year_5_growth=0.05, year_5_margin=0.45,
+    """The three cases the app actually opens on, as decimals.
+
+    Mirrors app.BEAR_DEFAULTS / BULL_DEFAULTS so these tests describe the shipped
+    product rather than a fixture that can quietly diverge from it. Year-1 margin is
+    not overridden because all three cases share it -- Q1 FY2027 is banked and Q2 is
+    guided, so Year 1 is close to known.
+    """
+    bear = dict(year_1_growth=0.64, year_5_growth=-0.05, year_5_margin=0.45,
                 wacc=0.12, terminal_growth=0.02)
-    bull = dict(year_1_growth=0.75, year_5_growth=0.25, year_5_margin=0.65,
-                wacc=0.09, terminal_growth=0.04)
+    bull = dict(year_1_growth=0.95, year_5_growth=0.00, year_5_margin=0.62,
+                wacc=0.105, terminal_growth=0.04)
     p_bear, p_base, p_bull = probability_split(cut_a, cut_b)
     return weighted_valuation({}, [("Bear", p_bear, bear), ("Base", p_base, {}),
                                    ("Bull", p_bull, bull)])
 
 
 def test_disagreement_forces_low_conviction_and_explains_itself():
-    """At defaults the mean says HOLD and the mass says SELL.
+    """At the opening split the mean says HOLD and the mass says BUY.
 
-    The honest answer is the more cautious verdict at low conviction, plus the
-    reason -- not a confident HOLD resting on one fat tail.
+    The weighted average is only +5% -- inside the HOLD band -- while 75% of the
+    probability sits above the price, because the bear case is the only one below it
+    and it carries just a quarter of the weight. The honest answer is the more
+    cautious of the two verdicts at low conviction, plus the reason.
     """
     rec = recommend(_wv(25, 75), 0.15, -0.15)
     assert rec.mean_verdict == "HOLD"
-    assert rec.mass_verdict == "SELL"
-    assert rec.verdict == "SELL"
+    assert rec.mass_verdict == "BUY"
+    assert rec.verdict == "HOLD"            # the more cautious of the two
     assert rec.conviction == "low"
-    assert rec.disagreement and "Bull" in rec.disagreement
+    assert rec.disagreement and "Base" in rec.disagreement
     assert "treat the mean with caution" in rec.disagreement
 
 
@@ -577,16 +617,18 @@ def test_zero_probability_cases_do_not_widen_the_range():
 def test_mass_thresholds():
     from dcf import MASS_BUY, MASS_SELL
     assert MASS_SELL < 0.5 < MASS_BUY
-    # a split that puts most weight on the bull case flips the mass verdict
-    assert recommend(_wv(5, 30), 0.15, -0.15).mass_verdict == "BUY"
-    assert recommend(_wv(25, 75), 0.15, -0.15).mass_verdict == "SELL"
+    # Base and Bull both sit above the price, so the mass verdict tracks how much
+    # weight the bear case carries: a quarter reads BUY, seventy per cent reads SELL.
+    assert recommend(_wv(25, 75), 0.15, -0.15).mass_verdict == "BUY"
+    assert recommend(_wv(70, 90), 0.15, -0.15).mass_verdict == "SELL"
 
 
 def test_recommendation_reports_the_mass_below_the_price():
     wv = _wv(25, 75)
     rec = recommend(wv, 0.15, -0.15)
     assert rec.mass_below == pytest.approx(1 - wv.probability_above_price)
-    assert rec.mass_below == pytest.approx(0.75)
+    # only the bear case is below the price, and it carries a quarter of the weight
+    assert rec.mass_below == pytest.approx(0.25)
 
 
 # --- complete cases must bypass the override merge ---
@@ -671,11 +713,11 @@ def test_per_year_case_keeps_its_explicit_margin_list():
 
 def test_solver_is_still_exact_at_sixty_iterations():
     """The iteration cut from 200 must not cost precision."""
-    for row in break_even({}, 180.0):
+    for row in break_even({}, PRICE):
         if row.required is None:
             continue
         got = run_dcf(**_apply_axis({}, row.key, row.required)).value_per_share
-        assert got == pytest.approx(180.0, abs=0.01), row.label
+        assert got == pytest.approx(PRICE, abs=0.01), row.label
 
 
 # --- validation: refuse to value, or value and say why it is suspect ---
@@ -701,11 +743,8 @@ def test_the_defaults_raise_nothing_at_all():
     Checked for the left pane and all three scenario cases.
     """
     assert run_dcf().warnings == []
-    for kwargs in (
-        dict(wacc=0.12, terminal_growth=0.02, year_5_margin=0.45),   # Bear default
-        dict(wacc=0.09, terminal_growth=0.04, year_5_margin=0.65),   # Bull default
-    ):
-        assert run_dcf(**kwargs).warnings == [], kwargs
+    for name, kwargs in CASE_ASSUMPTIONS.items():   # defined with the exhibit tests
+        assert run_dcf(**kwargs).warnings == [], name
 
 
 def test_terminal_multiple_blocks_above_its_cap_and_not_below():
@@ -770,7 +809,10 @@ def test_warnings_reuse_the_break_even_thresholds():
     """One definition of implausible, not two that can drift apart."""
     from dcf import MAX_TERMINAL_GROWTH, MIN_CREDIBLE_WACC, NVDA_GROSS_MARGIN, break_even
 
-    rows = {r.key: r for r in break_even({}, 180.0)}
+    # $260 is a stress target, chosen because both thresholds bite there: below it
+    # the required terminal growth is still under the cap, above it the terminal
+    # growth row becomes unreachable and has no value left to compare.
+    rows = {r.key: r for r in break_even({}, 260.0)}
     # the same constants drive both the break-even verdicts and the warnings
     assert rows["terminal_growth"].required > MAX_TERMINAL_GROWTH
     assert "terminal_growth_above_gdp" in _codes(
@@ -791,10 +833,10 @@ def test_break_even_still_solves_wacc_after_the_bracket_moved():
     assert lo >= 0.05
     run_dcf(wacc=lo, terminal_growth=0.03)          # the bracket end must be valuable
 
-    row = {r.key: r for r in break_even({}, 180.0)}["wacc"]
+    row = {r.key: r for r in break_even({}, PRICE)}["wacc"]
     assert row.required is not None, "the WACC break-even row must still solve"
     got = run_dcf(**_apply_axis({}, "wacc", row.required)).value_per_share
-    assert got == pytest.approx(180.0, abs=0.01)
+    assert got == pytest.approx(PRICE, abs=0.01)
 
 
 def test_sensitivity_grid_dashes_the_newly_blocked_cells():
@@ -804,3 +846,96 @@ def test_sensitivity_grid_dashes_the_newly_blocked_cells():
     assert grid[0][0] is not None        # 1% terminal growth at a 4% WACC is fine
     assert grid[1][0] is None            # 3.0% -> 103x, blocked
     assert grid[2][0] is None            # 3.5% -> 209x, blocked
+
+
+# --- the exhibit is the source of every default -------------------------------
+#
+# NVIDIA_Exhibits.xlsx, compiled 30 July 2026. Before this, the model ran on FY2025
+# while the exhibit carried FY2026 actuals, Q1 FY2027, and a 29 July 2026 valuation
+# date -- a full fiscal year adrift, with revenue understated by 65%.
+
+#: The three cases the app opens on, as decimals. One definition, shared by the
+#: warning check above and the ordering checks below.
+CASE_ASSUMPTIONS = {
+    "Bear": dict(year_1_growth=0.64, year_5_growth=-0.05, year_5_margin=0.45,
+                 wacc=0.12, terminal_growth=0.02),
+    "Base": dict(),
+    "Bull": dict(year_1_growth=0.95, year_5_growth=0.00, year_5_margin=0.62,
+                 wacc=0.105, terminal_growth=0.04),
+}
+
+
+def test_company_figures_are_the_exhibit_figures():
+    assert NVDA_DEFAULTS == {
+        "revenue": 215.9,        # Ex 1, FY2026 revenue $215,938M
+        "cash": 115.5,           # Ex 4/6, all non-operating assets
+        "debt": 8.47,            # Ex 4, total debt $8,470M
+        "shares": 24.22,         # Ex 6, shares outstanding
+        "current_price": 190.01, # Ex 6, close 29 July 2026
+    }
+
+
+def test_working_capital_default_reproduces_fy2026_actual_cash_flow():
+    """The one default that used to be an admitted guess.
+
+    Ex 5 reports "working capital absorption 19.3%", but on a different basis than
+    this model's % of *incremental* revenue. Solving instead for the figure that
+    reproduces FY2026 actual free cash flow of $96.575B is what fixes 12.8%. If
+    anyone rounds it to a tidier number this test says so.
+    """
+    import inspect
+    d = {k: v.default for k, v in inspect.signature(run_dcf).parameters.items()}
+    assert d["nwc_pct_of_growth"] == 0.128
+
+    fy2025, fy2026_actual_fcf = 130.497, 96.575
+    r = run_dcf(revenue=fy2025, year_1_growth=215.938 / fy2025 - 1,
+                year_1_margin=0.604, year_5_margin=0.604,   # FY2026 as reported
+                tax_rate=0.151, net_capex_pct=0.0148, horizon=5)
+    assert r.rows[0].revenue == pytest.approx(215.938, abs=0.01)
+    assert r.rows[0].free_cash_flow == pytest.approx(fy2026_actual_fcf, abs=0.05)
+
+
+def test_capm_builds_each_case_wacc_from_the_exhibit_betas():
+    from dcf import BOTTOM_UP_BETA, EQUITY_RISK_PREMIUM, RISK_FREE, capm_wacc
+
+    bull_beta, base_beta, bear_beta = BOTTOM_UP_BETA
+    assert capm_wacc(base_beta) == pytest.approx(
+        RISK_FREE + base_beta * EQUITY_RISK_PREMIUM, abs=0.00125)
+    # each lands on the WACC slider's 0.25% step, or the slider would move it
+    for beta in BOTTOM_UP_BETA:
+        assert abs(round(capm_wacc(beta) / 0.0025) * 0.0025 - capm_wacc(beta)) < 1e-12
+    assert capm_wacc(bull_beta) < capm_wacc(base_beta) < capm_wacc(bear_beta)
+    # the credibility floor is the same build-up at a beta of 1.0
+    assert MIN_CREDIBLE_WACC == pytest.approx(RISK_FREE + EQUITY_RISK_PREMIUM, abs=1e-9)
+
+
+def test_the_cases_are_ordered_and_the_base_sits_near_the_market():
+    """Anchoring Year 1 on consensus is the point: the base lands on the price.
+
+    That is the finding, not a coincidence to be tuned -- Ex 6's consensus FY2027
+    revenue, discounted at CAPM, is worth roughly what the market is paying. The
+    disagreement is about the deceleration curve, not the level.
+    """
+    values = {n: run_dcf(**k).value_per_share for n, k in CASE_ASSUMPTIONS.items()}
+    assert values["Bear"] < values["Base"] < values["Bull"]
+
+    price = NVDA_DEFAULTS["current_price"]
+    assert abs(values["Base"] / price - 1) < 0.10
+    assert values["Bear"] < price < values["Bull"]
+    # the bull end is not fantasy: it lands near Ex 6's mean sell-side target
+    assert abs(values["Bull"] / CONSENSUS_TARGET - 1) < 0.10
+
+
+def test_the_base_case_revenue_path_stays_inside_the_exhibit_tam():
+    """Ex 8 sizes the 2030 AI accelerator market at $1.4T, NVIDIA share 75-85%.
+
+    Forecast year 5 is FY2031, i.e. calendar 2030, so the two are comparable. This
+    is what pinned the Year-5 growth rate: the base case has to land inside the
+    share band the exhibit reports, not merely produce a pleasing valuation.
+    """
+    accelerator_tam_2030 = 1400.0
+    fy2031 = {n: run_dcf(**k).rows[4].revenue for n, k in CASE_ASSUMPTIONS.items()}
+    assert 0.75 <= fy2031["Base"] / accelerator_tam_2030 <= 0.85
+    # the bear takes roughly half the market, the bull holds near its 2023 peak
+    assert fy2031["Bear"] / accelerator_tam_2030 == pytest.approx(0.51, abs=0.05)
+    assert fy2031["Bull"] / accelerator_tam_2030 == pytest.approx(0.94, abs=0.05)

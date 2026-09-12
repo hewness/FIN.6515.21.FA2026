@@ -3,8 +3,9 @@
 import gradio as gr
 
 from dcf import (
-    NVDA_DEFAULTS, break_even, probability_split, recommend, run_dcf,
-    sensitivity_grid, weighted_valuation_from_cases,
+    BOTTOM_UP_BETA, CONSENSUS_TARGET, EQUITY_RISK_PREMIUM, NVDA_DEFAULTS, RISK_FREE,
+    break_even, capm_wacc, growth_schedule, margin_schedule, probability_split,
+    recommend, run_dcf, sensitivity_grid, weighted_valuation_from_cases,
 )
 from viz import (
     render_break_even, render_heatmap, render_probability_bar,
@@ -26,15 +27,60 @@ SIGNAL_COLORS = {
 # read against each other; only the columns differ.
 WACC_AXIS = [0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14]
 TERMINAL_AXIS = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05]
-# Brackets the 55% default and NVIDIA's actual 62.4%.
+# Brackets the 55% Year-5 default and the 65.6% Year-1 figure from Q1 FY2027.
 MARGIN_AXIS = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
 
 TAPER, PER_YEAR = "Taper Y1 to Y5", "Set each year"
 
-# Per-year defaults are the taper's own schedule, so switching mode at the
-# opening settings does not move the valuation.
-GROWTH_BY_YEAR = [50.0, 41.25, 32.5, 23.75, 15.0]
-MARGIN_BY_YEAR = [62.4, 60.55, 58.7, 56.85, 55.0]
+# --- opening assumptions, one dict per case ------------------------------------
+# Every figure traces to NVIDIA_Exhibits.xlsx (compiled 30 July 2026). Year-1 margin
+# is the same in all three: Q1 FY2027 is banked and Q2 is guided, so Year 1 is close
+# to known and the cases differentiate on the Year-5 margin instead. WACC is the CAPM
+# build-up at the low / mid / high end of the bottom-up semiconductor beta.
+BETA_BULL, BETA_BASE, BETA_BEAR = BOTTOM_UP_BETA
+
+
+def _wacc_pct(beta):
+    return round(capm_wacc(beta) * 100, 4)
+
+
+BASE_DEFAULTS = dict(
+    # Ex 6: consensus FY2027 revenue $393.6B against FY2026's $215.9B.
+    y1_growth=82.25,
+    # Lands FY2031 revenue at $1,088B -- 78% of Ex 8's $1.4T 2030 accelerator market,
+    # inside the 75-85% share band the exhibit gives. 0.25 rather than 0.00 so the
+    # taper's four steps land exactly on the sliders' 0.25 grid.
+    y5_growth=0.25,
+    y1_margin=65.6, y5_margin=55.0,
+    net_capex=1.5, nwc=12.8, tax=17.0,
+    wacc=_wacc_pct(BETA_BASE), terminal=3.0, horizon=10,
+)
+# Bear: Q2 guidance holds and then revenue is flat sequentially -- 81.6 + 91.0 x 3 =
+# $354.6B, +64%. That is a floor, not a guess: going lower requires H2 to fall below
+# an already-guided Q2. FY2031 lands at 51% of the accelerator market, i.e. custom
+# silicon and AMD take half of it.
+BEAR_DEFAULTS = dict(BASE_DEFAULTS, y1_growth=64.0, y5_growth=-5.0, y5_margin=45.0,
+                     wacc=_wacc_pct(BETA_BEAR), terminal=2.0)
+# Bull: ~$421B in FY2027, ahead of consensus, on Ex 8's ~$730B of 2026 hyperscaler
+# capex and ~$1T of cumulative Blackwell + Rubin visibility. FY2031 at 94% of the
+# accelerator market -- share holds near its 2023 peak.
+BULL_DEFAULTS = dict(BASE_DEFAULTS, y1_growth=95.0, y5_growth=0.0, y5_margin=62.0,
+                     wacc=_wacc_pct(BETA_BULL), terminal=4.0)
+
+
+def per_year_defaults(d):
+    """A case's taper expressed as five explicit years.
+
+    The per-year sliders open on the taper's own schedule, so switching mode at the
+    opening settings does not move the valuation. Derived per case rather than held
+    in one module-level list -- otherwise all three cases would open identically in
+    per-year mode while their taper sliders differed.
+    """
+    return (growth_schedule(d["y1_growth"], d["y5_growth"], d["terminal"], 10)[:5],
+            margin_schedule(d["y1_margin"], d["y5_margin"], horizon=10)[:5])
+
+
+GROWTH_BY_YEAR, MARGIN_BY_YEAR = per_year_defaults(BASE_DEFAULTS)
 
 CSS = """
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -64,6 +110,11 @@ CSS = """
 .model-warn ul { margin: 0; padding-left: 18px; }
 .model-warn li { font-size: 0.85rem; line-height: 1.55; margin: 3px 0; }
 .case-flag { color: #d97706; cursor: help; }
+
+/* Slider caption. Recessive on purpose -- it sources the number above it without
+   competing with the control for attention. */
+.cap { display: block; font-size: 0.76rem; line-height: 1.5; opacity: .62;
+       margin: -4px 0 2px; }
 
 /* --- year-by-year projection --- */
 .proj { width: 100%; border-collapse: collapse; font-size: 0.82rem;
@@ -466,10 +517,6 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
             margin_heat)
 
 
-# Bear and bull open as deliberate deviations from the working model. Only the
-# fields listed differ; everything else takes the standard opening value.
-BEAR_DEFAULTS = dict(y1_growth=25.0, y5_growth=5.0, y5_margin=45.0, wacc=12.0, terminal=2.0)
-BULL_DEFAULTS = dict(y1_growth=75.0, y5_growth=25.0, y5_margin=65.0, wacc=9.0, terminal=4.0)
 CUT_A_DEFAULT, CUT_B_DEFAULT = 25.0, 75.0
 
 #: Controls in one assumption panel. Four panels exist: the left pane plus one per case.
@@ -603,45 +650,55 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         pane and one per case -- built from this single definition so the panels
         cannot drift apart.
         """
-        d = defaults or {}
+        d = {**BASE_DEFAULTS, **(defaults or {})}
+        growth_by_year, margin_by_year = per_year_defaults(d)
         gr.Markdown("### Forecast detail")
         panel_mode = gr.Radio([TAPER, PER_YEAR], value=TAPER,
                               label="Growth & margin inputs")
 
         gr.Markdown("### Revenue growth")
         with gr.Group() as growth_taper_group:
-            y1g = gr.Slider(-20, 100, d.get("y1_growth", 50), step=0.25,
+            # Max 120, not 100: the bull case opens at 95, so a 100 ceiling leaves no
+            # room to stress the input it is most worth stressing.
+            y1g = gr.Slider(-20, 120, d["y1_growth"], step=0.25,
                             label="Year 1 revenue growth (%)")
-            y5g = gr.Slider(-10, 60, d.get("y5_growth", 15), step=0.25,
+            y5g = gr.Slider(-10, 60, d["y5_growth"], step=0.25,
                             label="Year 5 revenue growth (%)")
         with gr.Group(visible=False) as growth_year_group:
-            growth = [gr.Slider(-20, 100, GROWTH_BY_YEAR[i], step=0.25,
+            growth = [gr.Slider(-20, 120, growth_by_year[i], step=0.25,
                                 label=f"Year {i + 1} revenue growth (%)")
                       for i in range(5)]
 
         gr.Markdown("### Operating margin")
         with gr.Group() as margin_taper_group:
-            y1m = gr.Slider(0, 90, d.get("y1_margin", 62.4), step=0.05,
+            y1m = gr.Slider(0, 90, d["y1_margin"], step=0.05,
                             label="Year 1 operating margin (%)")
-            y5m = gr.Slider(0, 90, d.get("y5_margin", 55), step=0.05,
+            y5m = gr.Slider(0, 90, d["y5_margin"], step=0.05,
                             label="Year 5 operating margin (%)")
         with gr.Group(visible=False) as margin_year_group:
-            margins = [gr.Slider(0, 90, MARGIN_BY_YEAR[i], step=0.05,
+            margins = [gr.Slider(0, 90, margin_by_year[i], step=0.05,
                                  label=f"Year {i + 1} operating margin (%)")
                        for i in range(5)]
 
         gr.Markdown("### Cash flow")
-        capex = gr.Slider(0, 25, d.get("net_capex", 1.5), step=0.1,
+        capex = gr.Slider(0, 25, d["net_capex"], step=0.1,
                           label="Net capex (% of revenue)")
-        work_cap = gr.Slider(0, 50, d.get("nwc", 10), step=0.5,
+        # Step 0.1, not 0.5: the 12.8% default is calibrated to FY2026 actual free cash
+        # flow, and a coarser grid would round the calibration away.
+        work_cap = gr.Slider(0, 50, d["nwc"], step=0.1,
                              label="Working capital (% of revenue growth)")
-        tax = gr.Slider(0, 40, d.get("tax", 15), step=0.5, label="Tax rate (%)")
+        tax = gr.Slider(0, 40, d["tax"], step=0.5, label="Tax rate (%)")
 
         gr.Markdown("### Discount rate")
-        discount = gr.Slider(4, 20, d.get("wacc", 10), step=0.25, label="WACC (%)")
-        terminal = gr.Slider(0, 6, d.get("terminal", 3), step=0.1,
+        discount = gr.Slider(4, 20, d["wacc"], step=0.25, label="WACC (%)")
+        gr.Markdown(
+            f"<span class='cap'>CAPM: {RISK_FREE:.1%} risk-free + &beta; &times; "
+            f"{EQUITY_RISK_PREMIUM:.2%} equity risk premium. Bottom-up semiconductor "
+            f"&beta; {BOTTOM_UP_BETA[0]}&ndash;{BOTTOM_UP_BETA[-1]}.</span>"
+        )
+        terminal = gr.Slider(0, 6, d["terminal"], step=0.1,
                              label="Terminal growth (%)")
-        years = gr.Slider(5, 20, d.get("horizon", 10), step=1, label="Forecast years")
+        years = gr.Slider(5, 20, d["horizon"], step=1, label="Forecast years")
 
         controls = [panel_mode, y1g, y5g, *growth, y1m, y5m, *margins,
                     capex, work_cap, tax, discount, terminal, years]

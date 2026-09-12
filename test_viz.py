@@ -253,7 +253,7 @@ def test_columns_respect_the_24_unit_mark_cap():
 
 def test_net_debt_bar_flips_label_and_colour_with_its_sign():
     """A bar reading "Net debt" that pushes the total up would be a lie."""
-    net_cash = run_dcf()                                   # cash 43.2 > debt 8.5
+    net_cash = run_dcf()                            # cash 115.5 > debt 8.47
     assert net_cash.net_debt < 0
     step = waterfall_steps(net_cash)[3]
     assert step["label"] == "Net cash"
