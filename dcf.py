@@ -4,7 +4,15 @@ Pure valuation math -- no UI imports, so it can be tested on its own.
 All money figures are in billions of USD unless noted; per-share figures are in dollars.
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
+
+# Terminal value is FCF x (1 + g) / (WACC - g), and that multiple is what misbehaves
+# when WACC closes on g. Guarding the multiple rather than the raw spread is deliberate:
+# a 1pp spread is harmless at a 20% WACC and ruinous at 4%, so a spread rule would block
+# sane inputs and wave through mad ones. At WACC 4.0% against terminal 3.9% -- both
+# reachable on the sliders -- the multiple is 1,039x and the model reports $10,060/share.
+MAX_TERMINAL_MULTIPLE = 100.0      # beyond this it is arithmetic, not a valuation
+HIGH_TERMINAL_MULTIPLE = 40.0      # beyond this, worth saying out loud
 
 # Margin defaults, named so the sensitivity axis can rebuild the taper from them
 # rather than duplicating the literals.
@@ -19,6 +27,17 @@ NVDA_DEFAULTS = {
     "shares": 24.5,
     "current_price": 180.0,
 }
+
+
+@dataclass
+class ModelWarning:
+    """Something worth saying about a result that the model could still compute.
+
+    Carries a `code` as well as prose so tests and callers key off behaviour rather
+    than wording.
+    """
+    code: str
+    message: str
 
 
 @dataclass
@@ -53,6 +72,13 @@ class DCFResult:
     upside: float              # fraction, e.g. 0.25 == 25% upside
     wacc: float                # the discount rate this result was built with
     terminal_growth: float     # the long-run rate feeding the Gordon Growth formula
+    warnings: list[ModelWarning] = field(default_factory=list)
+
+    @property
+    def terminal_multiple(self) -> float:
+        """(1 + g) / (WACC - g) -- what the final year's cash flow is capitalised at."""
+        spread = self.wacc - self.terminal_growth
+        return (1 + self.terminal_growth) / spread if spread > 0 else float("inf")
 
     @property
     def net_debt(self) -> float:
@@ -180,6 +206,15 @@ def run_dcf(
             f"WACC ({wacc:.1%}) must exceed terminal growth ({terminal_growth:.1%}); "
             "otherwise the terminal value is infinite or negative."
         )
+    multiple = (1 + terminal_growth) / (wacc - terminal_growth)
+    if multiple > MAX_TERMINAL_MULTIPLE:
+        raise ValueError(
+            f"WACC ({wacc:.2%}) is too close to terminal growth "
+            f"({terminal_growth:.2%}): the terminal value would be "
+            f"{multiple:,.0f}\u00d7 the final year's cash flow. Past about "
+            f"{MAX_TERMINAL_MULTIPLE:,.0f}\u00d7 the figure is arithmetic rather than a "
+            "valuation \u2014 widen the gap between the two."
+        )
     if shares <= 0:
         raise ValueError("shares outstanding must be positive")
 
@@ -244,6 +279,7 @@ def run_dcf(
         upside=upside,
         wacc=wacc,
         terminal_growth=terminal_growth,
+        warnings=_validate(rows, wacc, terminal_growth),
     )
 
 
@@ -285,6 +321,51 @@ def _apply_axis(assumptions: dict, param: str, value: float) -> dict:
     return {**assumptions, param: value}
 
 
+def _validate(rows: list[YearRow], wacc: float, terminal_growth: float) -> list[ModelWarning]:
+    """Conditions the model can compute through but a reader should know about."""
+    found: list[ModelWarning] = []
+    multiple = (1 + terminal_growth) / (wacc - terminal_growth)
+    final = rows[-1]
+
+    if multiple > HIGH_TERMINAL_MULTIPLE:
+        found.append(ModelWarning(
+            "terminal_multiple",
+            f"The terminal value capitalises the final year's cash flow at "
+            f"{multiple:,.0f}\u00d7. Almost all of this valuation rests on that one "
+            f"multiple rather than on the years you projected.",
+        ))
+    if final.free_cash_flow < 0:
+        found.append(ModelWarning(
+            "negative_terminal_fcf",
+            f"The final year's free cash flow is negative "
+            f"(${final.free_cash_flow:,.1f}B), so the terminal value is a negative "
+            f"perpetuity. The per-share figure is arithmetically consistent but has no "
+            f"economic meaning \u2014 equity cannot be worth less than nothing.",
+        ))
+    if terminal_growth > MAX_TERMINAL_GROWTH:
+        found.append(ModelWarning(
+            "terminal_growth_above_gdp",
+            f"Terminal growth of {terminal_growth:.1%} is above long-run nominal GDP "
+            f"growth, sustained in perpetuity. That implies the company eventually "
+            f"becomes the whole economy.",
+        ))
+    peak_margin = max(row.operating_margin for row in rows)
+    if peak_margin > NVDA_GROSS_MARGIN:
+        found.append(ModelWarning(
+            "margin_above_gross",
+            f"An operating margin of {peak_margin:.1%} exceeds NVIDIA's "
+            f"{NVDA_GROSS_MARGIN:.0%} gross margin, which is not possible \u2014 operating "
+            f"margin is what remains after costs.",
+        ))
+    if wacc < MIN_CREDIBLE_WACC:
+        found.append(ModelWarning(
+            "wacc_below_floor",
+            f"A {wacc:.2%} discount rate is hard to defend for a company with "
+            f"NVIDIA's customer concentration.",
+        ))
+    return found
+
+
 def sensitivity_grid(
     x_param: str,
     x_values: list[float],
@@ -309,3 +390,348 @@ def sensitivity_grid(
                 row.append(None)
         grid.append(row)
     return grid
+
+
+# --- bear / base / bull scenarios -------------------------------------------
+
+@dataclass
+class ScenarioResult:
+    """One named case, its probability weight, and what it is worth."""
+    name: str
+    probability: float              # 0-1 share of the whole, before dropping failures
+    weight: float                   # 0-1, renormalised over the valuable cases
+    result: DCFResult | None        # None when this case cannot be valued
+    error: str | None = None
+
+    @property
+    def contribution(self) -> float:
+        """This case's share of the weighted value, in dollars per share."""
+        return self.weight * self.result.value_per_share if self.result else 0.0
+
+
+@dataclass
+class WeightedValuation:
+    scenarios: list[ScenarioResult]
+    weighted_value: float
+    valued_mass: float              # probability covered by cases that could be valued
+    probability_above_price: float
+    current_price: float
+
+    @property
+    def upside(self) -> float:
+        if self.current_price <= 0:
+            return 0.0
+        return self.weighted_value / self.current_price - 1
+
+    @property
+    def all_failed(self) -> bool:
+        return self.valued_mass <= 0
+
+
+def probability_split(cut_a: float, cut_b: float) -> tuple[float, float, float]:
+    """Turn two cut points on a 0-100 axis into three probabilities.
+
+    Three probabilities have two degrees of freedom, so two cut points express
+    them exactly -- and the three shares sum to 1 by construction, which removes
+    any need to validate or normalise what the user entered. `cut_a` past `cut_b`
+    is clamped rather than rejected.
+    """
+    lo, hi = sorted((max(0.0, min(100.0, cut_a)), max(0.0, min(100.0, cut_b))))
+    return lo / 100, (hi - lo) / 100, (100 - hi) / 100
+
+
+def weighted_valuation(
+    base_assumptions: dict,
+    cases: list[tuple[str, float, dict]],
+) -> WeightedValuation:
+    """Value each named case and take the probability-weighted average of the VALUES.
+
+    The weighting has to apply to the values, never to the assumptions: the model
+    is non-linear in its inputs (1 / (WACC - g) is convex), so averaging the
+    assumptions and valuing once gives a materially different -- and wrong --
+    answer. At a plausible bear/base/bull spread the two differ by ~47% and
+    disagree about whether the stock is cheap.
+
+    A case the model refuses to value is reported with its error and excluded;
+    the remaining weights are renormalised and `valued_mass` records how much
+    probability the answer actually covers.
+    """
+    priced = base_assumptions.get("current_price", NVDA_DEFAULTS["current_price"])
+
+    evaluated: list[ScenarioResult] = []
+    for name, probability, overrides in cases:
+        assumptions = dict(base_assumptions)
+        for key, value in overrides.items():
+            # Route through _apply_axis so a Year-5 margin override is not silently
+            # swallowed by an explicit per-year margin list.
+            assumptions = _apply_axis(assumptions, key, value)
+        try:
+            evaluated.append(
+                ScenarioResult(name, probability, 0.0, run_dcf(**assumptions))
+            )
+        except ValueError as exc:
+            evaluated.append(ScenarioResult(name, probability, 0.0, None, str(exc)))
+
+    valued_mass = sum(s.probability for s in evaluated if s.result is not None)
+    for s in evaluated:
+        s.weight = (s.probability / valued_mass) if (s.result and valued_mass > 0) else 0.0
+
+    return WeightedValuation(
+        scenarios=evaluated,
+        weighted_value=sum(s.contribution for s in evaluated),
+        valued_mass=valued_mass,
+        probability_above_price=sum(
+            s.probability for s in evaluated
+            if s.result and s.result.value_per_share > priced
+        ),
+        current_price=priced,
+    )
+
+
+# --- break-even framework ---------------------------------------------------
+# Damodaran's question: what would the company have to deliver to justify the
+# price? Answered by reverse-solving each driver, then judged against thresholds
+# that are SUBSTANTIVE rather than "is it inside the slider range" -- every
+# required value below sits inside its slider range, so range membership tests
+# nothing. Each threshold carries its basis so the judgment is auditable.
+NVDA_GROSS_MARGIN = 0.75        # FY2025 actual; an operating margin cannot exceed it
+MAX_TERMINAL_GROWTH = 0.04      # long-run nominal GDP; above this forever is not a forecast
+MIN_CREDIBLE_WACC = 0.07        # below this is hard to defend given customer concentration
+GLOBAL_SEMI_REVENUE = 792.0     # $B, 2025 industry total (SIA / Gartner)
+
+IMPOSSIBLE, DEMANDING, DEFENSIBLE = "impossible", "demanding", "defensible"
+
+# Mass thresholds for the probability reading. Deliberately wider than the mean's
+# +/-15%: a majority of probability has to agree before the verdict commits.
+MASS_BUY, MASS_SELL = 0.65, 0.35
+
+
+@dataclass
+class BreakEven:
+    """What one driver must reach, alone, for the base case to equal the price."""
+    key: str
+    label: str
+    base: float
+    required: float | None          # None when the price is unreachable on this driver
+    range_lo: float
+    range_hi: float
+    verdict: str
+    reason: str
+
+
+@dataclass
+class Recommendation:
+    verdict: str                    # BUY / HOLD / SELL
+    conviction: str                 # high / moderate / low
+    mean_verdict: str               # what the weighted value alone says
+    mass_verdict: str               # what the probability mass alone says
+    disagreement: str | None        # set when the two readings conflict
+    range_lo: float
+    range_hi: float
+    straddles_price: bool
+    mass_below: float
+
+
+#: Drivers offered in the break-even table, with the bracket used to solve them.
+BREAK_EVEN_DRIVERS = [
+    ("year_5_margin", "Year 5 operating margin", 0.0, 0.95),
+    ("terminal_growth", "Terminal growth", 0.0, 0.0599),
+    ("year_5_growth", "Year 5 revenue growth", -0.10, 0.80),
+    ("year_1_growth", "Year 1 revenue growth", 0.0, 2.00),
+    # 5%, not 4.01%: at a 3% terminal growth the old lower bound is a 102x multiple,
+    # which the block above now rejects -- the solver would see a nan at the bracket
+    # end and report the whole WACC row as unreachable.
+    ("wacc", "WACC", 0.05, 0.30),
+]
+
+
+def solve_for_target(
+    assumptions: dict,
+    param: str,
+    lo: float,
+    hi: float,
+    target: float,
+    iterations: int = 60,
+) -> float | None:
+    """Bisect `param` for the value that makes value-per-share equal `target`.
+
+    Returns None when `target` is not bracketed by [lo, hi]. Axis values go in
+    through `_apply_axis`, so a Year-5 margin solve is not silently swallowed by
+    an explicit per-year margin list.
+
+    60 iterations halves the bracket 60 times, which is already past float
+    precision; each one costs two valuations, so the old 200 was spending about
+    1,400 `run_dcf` calls per driver for nothing.
+    """
+    def error(x: float) -> float:
+        try:
+            return run_dcf(**_apply_axis(assumptions, param, x)).value_per_share - target
+        except ValueError:
+            return float("nan")
+
+    f_lo, f_hi = error(lo), error(hi)
+    if f_lo != f_lo or f_hi != f_hi or not (f_lo < 0 < f_hi or f_hi < 0 < f_lo):
+        return None
+
+    for _ in range(iterations):
+        mid = (lo + hi) / 2
+        if error(lo) * error(mid) <= 0:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2
+
+
+def current_setting(assumptions: dict, key: str) -> float:
+    """The caller's present setting for a driver, however it was expressed."""
+    explicit_margins = assumptions.get("operating_margins")
+    explicit_growth = assumptions.get("growth_rates")
+    if key == "year_5_margin" and explicit_margins is not None:
+        return explicit_margins[4]
+    if key == "year_5_growth" and explicit_growth is not None:
+        return explicit_growth[4]
+    if key == "year_1_growth" and explicit_growth is not None:
+        return explicit_growth[0]
+
+    import inspect
+    default = inspect.signature(run_dcf).parameters[key].default
+    value = assumptions.get(key, default)
+    return default if value is None else value
+
+
+def _judge(key: str, required: float, assumptions: dict) -> tuple[str, str]:
+    """Is this required value something a reasonable analyst could believe?"""
+    if key == "year_5_margin" and required > NVDA_GROSS_MARGIN:
+        return IMPOSSIBLE, (
+            "an operating margin cannot exceed the gross margin; NVIDIA's FY2025 "
+            f"gross margin was {NVDA_GROSS_MARGIN:.0%}"
+        )
+    if key == "terminal_growth" and required > MAX_TERMINAL_GROWTH:
+        return IMPOSSIBLE, "above long-run nominal GDP growth, sustained in perpetuity"
+    if key == "wacc" and required < MIN_CREDIBLE_WACC:
+        return DEMANDING, (
+            "a discount rate this low is hard to defend given NVIDIA's customer "
+            "concentration"
+        )
+    if key in ("year_1_growth", "year_5_growth"):
+        implied = run_dcf(**_apply_axis(assumptions, key, required)).rows[-1].revenue
+        if implied > GLOBAL_SEMI_REVENUE:
+            return DEMANDING, (
+                f"implies ${implied:,.0f}B of final-year revenue, more than the entire "
+                f"2025 global semiconductor industry (${GLOBAL_SEMI_REVENUE:,.0f}B)"
+            )
+    return DEFENSIBLE, "within the range of reasonable disagreement"
+
+
+def break_even(assumptions: dict, target_price: float) -> list[BreakEven]:
+    """What each driver alone must deliver for the base case to equal the price."""
+    rows = []
+    for key, label, lo, hi in BREAK_EVEN_DRIVERS:
+        base = current_setting(assumptions, key)
+        required = solve_for_target(assumptions, key, lo, hi, target_price)
+        if required is None:
+            rows.append(BreakEven(key, label, base, None, lo, hi, IMPOSSIBLE,
+                                  "no value of this driver alone reaches the price"))
+            continue
+        verdict, reason = _judge(key, required, assumptions)
+        rows.append(BreakEven(key, label, base, required, lo, hi, verdict, reason))
+    return rows
+
+
+def recommend(wv: WeightedValuation, buy_above: float, sell_below: float) -> Recommendation:
+    """Combine a central estimate and a probability mass into an honest verdict.
+
+    Two readings, reported together rather than blended. A blended score would
+    hide the case where the weighted mean sits near the price only because one
+    fat tail drags it there -- and that conflict is the most informative thing
+    the panel can say.
+    """
+    # Only cases you actually give weight to define the range. A scenario parked at
+    # zero probability is still valued, and letting it widen the range would keep
+    # reporting a straddle -- and so deny high conviction -- for a view the analyst
+    # has explicitly ruled out.
+    values = [s.result.value_per_share for s in wv.scenarios
+              if s.result and s.probability > 0]
+    lo, hi = (min(values), max(values)) if values else (0.0, 0.0)
+    price = wv.current_price
+
+    mean_verdict = ("BUY" if wv.upside > buy_above else
+                    "SELL" if wv.upside < sell_below else "HOLD")
+    above = wv.probability_above_price
+    mass_verdict = ("BUY" if above >= MASS_BUY else
+                    "SELL" if above <= MASS_SELL else "HOLD")
+
+    straddles = lo < price < hi
+    caution = {"SELL": 0, "HOLD": 1, "BUY": 2}
+    disagreement = None
+
+    if mean_verdict == mass_verdict:
+        verdict = mean_verdict
+        conviction = "high" if not straddles else "moderate"
+    else:
+        verdict = min((mean_verdict, mass_verdict), key=lambda v: caution[v])
+        conviction = "low"
+        driver = max((s for s in wv.scenarios if s.result),
+                     key=lambda s: s.contribution, default=None)
+        if driver and wv.weighted_value:
+            share = driver.contribution / wv.weighted_value
+            disagreement = (
+                f"Your weighted average (${wv.weighted_value:,.0f}) reads {mean_verdict}, "
+                f"but {1 - above:.0%} of your probability sits below the price. The "
+                f"average is carried by the {driver.name} case: {share:.0%} of it from "
+                f"{driver.probability:.0%} of the probability. The mean and the mass "
+                f"disagree, so treat the mean with caution."
+            )
+        else:
+            disagreement = (f"The weighted average reads {mean_verdict} but the "
+                            f"probability mass reads {mass_verdict}.")
+
+    return Recommendation(verdict, conviction, mean_verdict, mass_verdict, disagreement,
+                          lo, hi, straddles, 1 - above)
+
+
+def weighted_valuation_from_cases(
+    cases: list[tuple[str, float, dict]],
+) -> WeightedValuation:
+    """Weight three *complete, independent* cases rather than overrides on a base.
+
+    `weighted_valuation` merges overrides through `_apply_axis`, which is right for
+    the break-even solver -- it genuinely perturbs one key at a time -- but wrong
+    here, and silently so. A complete case dict always carries both
+    `operating_margins` (None in taper mode) and `year_5_margin`, and routing that
+    through the merge gives three different answers depending on order:
+
+        year_5_margin applied first   $45.01
+        operating_margins first       $38.99
+        run_dcf(**case) directly      $38.16
+
+    Applying `year_5_margin` at all materialises a margin list, which is not what
+    the taper path means; and a later `operating_margins: None` wipes that list out.
+    Calling `run_dcf` with the case dict is the only order-independent reading, so
+    that is what this does.
+    """
+    priced = NVDA_DEFAULTS["current_price"]
+    evaluated: list[ScenarioResult] = []
+    for name, probability, assumptions in cases:
+        priced = assumptions.get("current_price", priced)
+        try:
+            evaluated.append(
+                ScenarioResult(name, probability, 0.0, run_dcf(**assumptions))
+            )
+        except ValueError as exc:
+            evaluated.append(ScenarioResult(name, probability, 0.0, None, str(exc)))
+
+    valued_mass = sum(s.probability for s in evaluated if s.result is not None)
+    for s in evaluated:
+        s.weight = (s.probability / valued_mass) if (s.result and valued_mass > 0) else 0.0
+
+    return WeightedValuation(
+        scenarios=evaluated,
+        weighted_value=sum(s.contribution for s in evaluated),
+        valued_mass=valued_mass,
+        probability_above_price=sum(
+            s.probability for s in evaluated
+            if s.result and s.result.value_per_share > priced
+        ),
+        current_price=priced,
+    )

@@ -24,11 +24,12 @@ The server runs in the foreground; stop it with Ctrl+C.
 .venv\Scripts\python.exe -m pytest
 ```
 
-64 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+126 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
-discount factor, and that the parts sum to the reported totals.
+discount factor, and that the parts sum to the reported totals. It also pins the
+scenario weighting and the two tiers of input validation.
 
 `test_app_wiring.py` covers the UI. Two failure modes get specific guards, because both
 would leave an app that still runs and still prints a plausible number:
@@ -37,6 +38,9 @@ would leave an app that still runs and still prints a plausible number:
   asserts the component list and the handler signature stay in lockstep by label.
 - **A table that disagrees with the engine.** The projection table's rendered cells are
   parsed back out of the HTML and compared, exactly, against a direct `run_dcf()` call.
+- **Layout that quietly regresses.** The app opens on a visible tab, the mode toggle hides
+  a whole column rather than its contents, and no tab relies on individual visibility —
+  each of those was a real bug found only by opening the app, so each now has a guard.
 
 `test_viz.py` does the same for the two charts, which are harder to check than a table because
 it renders and looks plausible whatever it draws. The tests invert the plotted SVG
@@ -51,7 +55,7 @@ substitute available for looking at the thing.
 |---|---|
 | `dcf.py` | The valuation math. Pure functions, no UI imports, independently testable. |
 | `viz.py` | Color scales (computed in OKLab), the heatmap, the projection chart and the waterfall. |
-| `app.py` | Gradio UI — sliders, the result panels, and the five tabs. |
+| `app.py` | Gradio UI — the assumption panels, the result panels, and the tabs. |
 | `test_dcf.py` | Valuation math tests. |
 | `test_app_wiring.py` | Guards on the UI-to-model binding. |
 | `test_viz.py` | Guards on chart geometry, palettes, labels and the waterfall's arithmetic. |
@@ -70,6 +74,53 @@ One toggle governs both growth and margin, so the two stay at matching levels of
 The per-year sliders open on the taper's own schedule, so switching modes at the default
 settings does not move the valuation — the two modes are the same forecast expressed two
 ways, which the test suite asserts.
+
+## Scenario analysis
+
+Ticking **Scenario analysis** splits the app into three complete, independent cases. Each
+of Base, Bear and Bull gets its own tab holding a full assumption panel and the full set of
+views, so a bear case can differ on horizon, tax rate or capex — not just on the headline
+drivers. The probability split sits in the mode's own box: two cut points on a 0–100 axis,
+so the three probabilities sum to 100 by construction rather than by validation.
+
+The **Scenarios** tab then reports:
+
+- a **buy/hold/sell recommendation** with an explicit conviction level;
+- the three case values and the probability-weighted average;
+- **what the market price requires** — each driver reverse-solved to the value that would
+  justify today's price, with a verdict on whether that is defensible.
+
+Two things about how that is calculated are worth knowing, because both are easy to get
+wrong and neither is visible in the output:
+
+**The weighting applies to the values, not the assumptions.** The model is non-linear —
+`1/(WACC − g)` is convex — so `Σ pᵢ·V(caseᵢ)` and `V(Σ pᵢ·caseᵢ)` are different numbers. At
+a plausible spread they differ by about 47% and disagree about whether the stock is cheap.
+
+**The recommendation reports two readings rather than blending them.** The weighted mean
+and the probability mass can disagree — a mean sitting near the price because one fat tail
+drags it there is not the same as a balanced view. When they conflict the panel takes the
+more cautious verdict, drops to low conviction, and names the case responsible.
+
+## Validation
+
+Inputs are checked in two tiers, because not everything questionable is wrong.
+
+**Refused outright**, with a red card on every panel:
+
+- WACC at or below terminal growth — the perpetuity is infinite or negative;
+- a terminal multiple above **100×** — `(1+g)/(WACC−g)` past that point is arithmetic
+  rather than valuation. The guard is on the multiple, not the raw spread, because a 1pp
+  spread is harmless at a 20% WACC and ruinous at 4%.
+
+**Valued, with an amber notice** naming the issue: a terminal multiple above 40×, a negative
+final-year cash flow (so the terminal value is a negative perpetuity), terminal growth above
+long-run GDP, an operating margin above the gross margin, or a WACC below a credible floor.
+The last three reuse the same constants that drive the break-even verdicts, so there is one
+definition of implausible rather than two that can drift.
+
+The opening settings trip none of this, deliberately — a validation layer that fires on the
+first screen only teaches people to ignore it.
 
 ## What the model does
 
@@ -98,6 +149,10 @@ ways, which the test suite asserts.
    number.
 6. **Bridges to per-share value**: enterprise value less net debt (cash minus debt),
    divided by shares outstanding.
+
+With scenario analysis off, the app shows one model through five tabs. With it on, those
+are replaced by Scenarios plus one tab per case, each carrying the same five views of its
+own forecast.
 
 The **Valuation** tab shows KPI cards, then a year-by-year forecast table — revenue,
 operating margin, EBIT, NOPAT, free cash flow, discount factor and present value for

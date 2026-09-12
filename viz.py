@@ -480,3 +480,260 @@ def render_waterfall(r) -> str:
       <p class="wf-note">{per_share}</p>
     </div>
     """
+
+
+# --- scenario panel ---------------------------------------------------------
+# Bear / base / bull is a STATUS scale -- bad, neutral, good -- so it takes the
+# red / grey / green reading everyone already has, and it lines up with the buy /
+# hold / sell signal colours used elsewhere in the app.
+#
+# Red against green is the classic colour-vision-deficiency trap, so the steps are
+# separated in LIGHTNESS rather than hue alone, which is what CVD preserves. Both
+# sets pass the all-pairs gate that way:
+#   light  worst pair green<->red  deltaE 8.6 deutan   (>=8 target)
+#   dark   worst pair green<->red  deltaE 16.1 deutan
+# The neutral sits below 3:1 against its surface in both themes by design -- it is a
+# pale block, not a mark -- and every segment carries an inline label, which is the
+# documented relief. Colour is never the only channel here.
+PROB_COLORS = {
+    "Bear": {"light": "#dc2626", "dark": "#e66767"},
+    "Base": {"light": "#d8d6cd", "dark": "#52514e"},
+    "Bull": {"light": "#15803d", "dark": "#6ee7a0"},
+}
+
+# Derived quantities wear the waterfall's total grey, marking them as not an input.
+DERIVED_GREY = "#898781"
+
+SP_W, SP_H = 720, 210
+SP_PAD = {"l": 86, "r": 20, "t": 18, "b": 38}
+SP_BAR = 24.0
+
+
+def render_probability_bar(shares: tuple[float, float, float],
+                           names=("Bear", "Base", "Bull")) -> str:
+    """Read-only segmented bar showing how probability is allocated.
+
+    Each segment picks its own ink by lightness, so the label stays legible on a
+    deep red, a pale grey and a bright green alike -- a single hard-coded text
+    colour cannot work across all three.
+    """
+    segments = ""
+    for name, share in zip(names, shares):
+        if share <= 0:
+            continue
+        colour = PROB_COLORS[name]
+        segments += (
+            f'<div class="sp-seg" style="flex:{share:.6f};'
+            f'--c-l:{colour["light"]};--c-d:{colour["dark"]};'
+            f'--ink-l:{ink_for(colour["light"], "light")};'
+            f'--ink-d:{ink_for(colour["dark"], "dark")}"'
+            f' title="{name} {share:.0%}">'
+            f'<span class="sp-seg-l">{name} {share:.0%}</span></div>'
+        )
+    return f'<div class="sp-bar">{segments}</div>'
+
+
+def render_scenario_panel(wv) -> str:
+    """Diverging bars from the market price, one per case plus the weighted average.
+
+    Each case's job is its distance from the market price, which is the diverging
+    case -- so this reuses the same poles as the heatmap and the waterfall: blue is
+    worth more than the price, red is worth less.
+    """
+    rows = [(s.name, s.result.value_per_share if s.result else None, s.weight, s.error)
+            for s in wv.scenarios]
+    rows.append(("Weighted", wv.weighted_value, None, None))
+
+    price = wv.current_price
+    values = [v for _, v, _, _ in rows if v is not None] + [price, 0.0]
+    top, _ = _nice_ceiling(max(values))
+    plot_w = SP_W - SP_PAD["l"] - SP_PAD["r"]
+    plot_h = SP_H - SP_PAD["t"] - SP_PAD["b"]
+    band = plot_h / len(rows)
+
+    def x_at(v: float) -> float:
+        return SP_PAD["l"] + plot_w * (v / top)
+
+    price_x = x_at(price)
+    grid = ""
+    for level in (0, price, top):
+        grid += (f'<line class="sp-grid" x1="{x_at(level):.1f}" y1="{SP_PAD["t"]}" '
+                 f'x2="{x_at(level):.1f}" y2="{SP_PAD["t"] + plot_h:.1f}"/>')
+
+    bars, labels = "", ""
+    for i, (name, value, weight, error) in enumerate(rows):
+        cy = SP_PAD["t"] + band * (i + 0.5)
+        labels += (f'<text class="sp-name" x="{SP_PAD["l"] - 10}" '
+                   f'y="{cy + 3.5:.1f}">{name}</text>')
+
+        if value is None:
+            labels += (f'<text class="sp-na" x="{price_x + 8:.1f}" y="{cy + 3.5:.1f}">'
+                       f'cannot be valued</text>')
+            continue
+
+        x = x_at(value)
+        left, right = min(price_x, x), max(price_x, x)
+        if name == "Weighted":
+            fill_l = fill_d = DERIVED_GREY
+        elif value >= price:
+            fill_l, fill_d = POLES["light"]["under"], POLES["dark"]["under"]
+        else:
+            fill_l, fill_d = POLES["light"]["over"], POLES["dark"]["over"]
+
+        bars += (
+            f'<rect class="sp-bar-r" data-case="{name}" x="{left:.1f}" '
+            f'y="{cy - SP_BAR / 2:.1f}" width="{max(right - left, 1.5):.1f}" '
+            f'height="{SP_BAR}" rx="3" style="--c-l:{fill_l};--c-d:{fill_d}">'
+            f'<title>{name}: ${value:,.2f} ({value / price - 1:+.1%} vs price)</title>'
+            f'</rect>'
+        )
+        suffix = f'  ({weight:.0%})' if weight is not None else ""
+        labels += (f'<text class="sp-val" x="{right + 8:.1f}" y="{cy + 3.5:.1f}">'
+                   f'${value:,.0f}{suffix}</text>')
+
+    return f"""
+    <div class="sp-wrap">
+      <svg class="sp" viewBox="0 0 {SP_W} {SP_H}" role="img"
+           aria-label="Intrinsic value by scenario against the market price">
+        {grid}{bars}{labels}
+        <text class="sp-tick" x="{price_x:.1f}" y="{SP_PAD["t"] + plot_h + 16:.1f}">
+          price ${price:,.0f}</text>
+        <text class="sp-tick" x="{SP_PAD["l"]:.1f}" y="{SP_PAD["t"] + plot_h + 16:.1f}">0</text>
+      </svg>
+    </div>
+    """
+
+
+# --- recommendation & break-even --------------------------------------------
+# The dumbbell is one hue, not the usual "1 hue, 2 shades": the light step
+# (#86b6ef) reaches only 2.11:1 on white, so the before/after distinction is
+# carried by hollow-vs-filled instead. Rings in the surface colour are already
+# this app's mark vocabulary.
+DUMBBELL = {"light": "#2a78d6", "dark": "#3987e5"}     # 4.42 / 5.26 contrast
+
+# Reserved status palette. These always ship with an icon AND a label -- light-mode
+# warning is 1.83:1 by design, and the pairing is the documented mitigation.
+VERDICT_STYLE = {
+    "impossible": ("#d03b3b", "&#10007;", "impossible"),
+    "demanding": ("#fab219", "&#9888;", "demanding"),
+    "defensible": ("#0ca30c", "&#10003;", "defensible"),
+}
+CONVICTION_NOTE = {
+    "high": "every weighted case falls on one side of the price",
+    "moderate": "the weighted range spans the price",
+    "low": "the central estimate and the probability mass disagree",
+}
+
+BE_W, BE_ROW = 720, 40
+BE_PAD = {"l": 188, "r": 150}
+
+
+def render_recommendation(rec, price: float) -> str:
+    """Verdict, conviction, and the range it rests on -- rounded, not precise.
+
+    The headline rounds to the nearest $10 on purpose: a scenario range two
+    hundred dollars wide does not support cents.
+    """
+    colour = {"BUY": "#16a34a", "HOLD": "#d97706", "SELL": "#dc2626"}[rec.verdict]
+    warn = ""
+    if rec.disagreement:
+        warn = f'<p class="rec-warn">&#9888; {rec.disagreement}</p>'
+    return f"""
+    <div class="rec" style="--rec:{colour}">
+      <div class="rec-label">Recommendation</div>
+      <div class="rec-verdict">{rec.verdict}
+        <span class="rec-conv">&middot; {rec.conviction} conviction</span></div>
+      <div class="rec-range">Value range
+        <strong>${round(rec.range_lo, -1):,.0f} &ndash; ${round(rec.range_hi, -1):,.0f}</strong>
+        against a ${price:,.0f} market price</div>
+      <div class="rec-mass">{rec.mass_below:.0%} of your probability sits below the price
+        &middot; <span class="rec-why">{CONVICTION_NOTE[rec.conviction]}</span></div>
+      {warn}
+    </div>
+    """
+
+
+def render_break_even(rows, price: float) -> str:
+    """Dumbbell per driver: your assumption against what the price requires.
+
+    Each row is scaled to its own bracket. The drivers are in different units, so
+    a shared axis would invite a comparison that does not mean anything.
+    """
+    height = BE_ROW * len(rows) + 16
+    track_w = BE_W - BE_PAD["l"] - BE_PAD["r"]
+    marks, text = "", ""
+
+    for i, r in enumerate(rows):
+        cy = 14 + BE_ROW * i
+        colour, icon, word = VERDICT_STYLE[r.verdict]
+        text += (f'<text class="be-label" x="{BE_PAD["l"] - 12}" y="{cy + 4:.1f}">'
+                 f'{r.label}</text>')
+        marks += (f'<line class="be-track" x1="{BE_PAD["l"]}" y1="{cy:.1f}" '
+                  f'x2="{BE_PAD["l"] + track_w}" y2="{cy:.1f}"/>')
+
+        def at(value: float) -> float:
+            span = (r.range_hi - r.range_lo) or 1.0
+            frac = min(max((value - r.range_lo) / span, 0.0), 1.0)
+            return BE_PAD["l"] + track_w * frac
+
+        if r.required is None:
+            text += (f'<text class="be-na" x="{BE_PAD["l"] + 4}" y="{cy + 4:.1f}">'
+                     f'unreachable on this driver alone</text>')
+        else:
+            x_base, x_req = at(r.base), at(r.required)
+            marks += (f'<line class="be-join" x1="{x_base:.1f}" y1="{cy:.1f}" '
+                      f'x2="{x_req:.1f}" y2="{cy:.1f}"/>')
+            # hollow = your assumption, filled = what the price demands
+            marks += (f'<circle class="be-yours" cx="{x_base:.1f}" cy="{cy:.1f}" r="5">'
+                      f'<title>your assumption: {r.base:.1%}</title></circle>')
+            marks += (f'<circle class="be-req" data-driver="{r.key}" cx="{x_req:.1f}" '
+                      f'cy="{cy:.1f}" r="5"><title>required: {r.required:.1%}</title></circle>')
+            text += (f'<text class="be-num" x="{BE_PAD["l"] + track_w + 10}" '
+                     f'y="{cy + 4:.1f}">{r.base:.1%} &#8594; {r.required:.1%}</text>')
+
+        text += (f'<text class="be-verdict" style="fill:{colour}" '
+                 f'x="{BE_PAD["l"] - 12}" y="{cy + 17:.1f}">{icon} {word}</text>')
+        text += (f'<text class="be-reason" x="{BE_PAD["l"] + 4}" y="{cy + 17:.1f}">'
+                 f'{r.reason}</text>')
+
+    closed = sum(1 for r in rows if r.verdict != "defensible")
+    ok = [r.label for r in rows if r.verdict == "defensible"]
+    tail = (f"Defensible: {', '.join(ok)} &mdash; that is where the research effort belongs."
+            if ok else "None of them is defensible on its own.")
+    summary = (
+        f"<strong>{closed} of the {len(rows)}</strong> single-driver routes to "
+        f"${price:,.0f} are impossible or demanding. {tail}"
+    )
+    return f"""
+    <div class="be-wrap">
+      <div class="be-cap">What ${price:,.0f} requires &mdash; each driver alone,
+        everything else at your base case</div>
+      <svg class="be" viewBox="0 0 {BE_W} {height}" role="img"
+           aria-label="Required value of each driver to justify the market price">
+        {marks}{text}
+      </svg>
+      <p class="be-summary">{summary}</p>
+    </div>
+    """
+
+
+def render_warnings(warnings) -> str:
+    """Amber notice for conditions the model valued through but a reader should know.
+
+    Deliberately the same treatment as the recommendation's mean-versus-mass notice:
+    the app already has one way of saying "this computed, but be careful", and a
+    second visual language would just be noise. Returns an empty string when there is
+    nothing to say, so a clean scenario shows no chrome at all.
+    """
+    if not warnings:
+        return ""
+    items = "".join(
+        f'<li data-code="{w.code}">{w.message}</li>' for w in warnings
+    )
+    plural = "" if len(warnings) == 1 else "s"
+    return (
+        f'<div class="model-warn">'
+        f'<div class="model-warn-head">&#9888; {len(warnings)} thing{plural} worth '
+        f'knowing about this valuation</div>'
+        f'<ul>{items}</ul></div>'
+    )

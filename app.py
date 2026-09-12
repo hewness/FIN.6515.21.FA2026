@@ -2,8 +2,15 @@
 
 import gradio as gr
 
-from dcf import NVDA_DEFAULTS, run_dcf, sensitivity_grid
-from viz import render_heatmap, render_projection_chart, render_waterfall
+from dcf import (
+    NVDA_DEFAULTS, break_even, probability_split, recommend, run_dcf,
+    sensitivity_grid, weighted_valuation_from_cases,
+)
+from viz import (
+    render_break_even, render_heatmap, render_probability_bar,
+    render_projection_chart, render_recommendation, render_scenario_panel,
+    render_warnings, render_waterfall,
+)
 
 # Upside thresholds that separate the three signals.
 BUY_ABOVE = 0.15
@@ -46,6 +53,17 @@ CSS = """
                   padding: 14px 0 2px; }
 .warn { border: 1px solid #dc2626; background: rgba(220,38,38,0.08);
         border-radius: 10px; padding: 16px; }
+
+/* Amber, not red: the model produced a number, it just comes with conditions. Same
+   treatment as the recommendation's mean-vs-mass notice, so there is one visual
+   language for "this computed, but be careful". */
+.model-warn { border: 1px solid rgba(217,119,6,0.35); background: rgba(217,119,6,0.10);
+              border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+.model-warn-head { font-size: 0.78rem; font-weight: 650; text-transform: uppercase;
+                   letter-spacing: .05em; color: #d97706; margin-bottom: 6px; }
+.model-warn ul { margin: 0; padding-left: 18px; }
+.model-warn li { font-size: 0.85rem; line-height: 1.55; margin: 3px 0; }
+.case-flag { color: #d97706; cursor: help; }
 
 /* --- year-by-year projection --- */
 .proj { width: 100%; border-collapse: collapse; font-size: 0.82rem;
@@ -132,6 +150,130 @@ html:not(.dark) .c-end, html:not(.dark) .c-dot { fill: var(--c-l); }
 @media (prefers-color-scheme: dark) { .wf-bar { fill: var(--c-d); } }
 .dark .wf-bar { fill: var(--c-d); }
 html:not(.dark) .wf-bar { fill: var(--c-l); }
+
+/* The mode box: the toggle and, once checked, the split it controls -- one
+   container, so they read as the same control. The border lives here and nowhere
+   else; Gradio's own form box around the checkbox is flattened so the two do not
+   nest, and there is no secondary grey fill. */
+.mode-box { border: 1px solid var(--border-color-primary); border-radius: 10px;
+            background: transparent; padding: 12px 14px 6px; margin-bottom: 14px;
+            gap: 4px; }
+.mode-box .form,
+.mode-box .block,
+.mode-box .gr-box { border: none !important; background: transparent !important;
+                    box-shadow: none !important; padding: 0 !important; }
+.mode-note p { font-size: 0.82rem; color: var(--body-text-color-subdued);
+               margin: 2px 0 8px; }
+
+/* Scenarios panel head: the verdict beside its supporting numbers. Shares the
+   3fr/2fr ratio of the chart/table split below so one column edge runs the length
+   of the panel. */
+.sp-head { display: grid; gap: 20px; align-items: start; margin-bottom: 4px;
+           grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) minmax(0, 4fr); }
+.sp-head > .rec { margin-bottom: 0; }
+.sp-head-drivers { min-width: 0; }
+.sp-head-drivers .be-wrap { margin-top: 0; }
+/* Three columns need more room than two, so this breaks earlier: first to verdict +
+   tiles over drivers, then to a single column. */
+@media (max-width: 1250px) {
+  .sp-head { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .sp-head-drivers { grid-column: 1 / -1; }
+}
+@media (max-width: 900px) { .sp-head { grid-template-columns: minmax(0, 1fr); } }
+
+/* Stacked tiles run narrow, so they trade the big hero figure for a tighter box. */
+.kpi-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.kpi-stack .kpi { padding: 11px 14px; }
+.kpi-stack .kpi .value { font-size: 1.35rem; }
+.kpi-stack .kpi .label { margin-bottom: 3px; }
+
+/* Scenarios panel: the value chart and the by-scenario table read together, so
+   they sit side by side. Collapses to one column when there is not room. */
+.sp-split { display: grid; gap: 20px; align-items: start; margin-top: 6px;
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.sp-split-chart, .sp-split-table { min-width: 0; }
+.sp-split-table .bridge { margin-top: 0; }
+@media (max-width: 900px) { .sp-split { grid-template-columns: minmax(0, 1fr); } }
+
+/* The table is in a narrower column now, so it trades a little air for fit. */
+.bridge.compact { font-size: 0.82rem; }
+.bridge.compact td { padding: 5px 4px; }
+.bridge.compact caption { padding-top: 0; }
+
+/* --- recommendation & break-even --- */
+.rec { border: 1px solid var(--border-color-primary); border-left: 4px solid var(--rec);
+       border-radius: 10px; padding: 16px 18px; margin-bottom: 14px;
+       background: var(--background-fill-secondary); }
+.rec-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em;
+             opacity: .6; margin-bottom: 6px; }
+.rec-verdict { font-size: 1.7rem; font-weight: 700; color: var(--rec); line-height: 1.1; }
+.rec-conv { font-size: 0.95rem; font-weight: 550; color: var(--body-text-color-subdued); }
+.rec-range { font-size: 0.95rem; margin-top: 8px; }
+.rec-mass { font-size: 0.85rem; color: var(--body-text-color-subdued); margin-top: 4px; }
+.rec-why { font-style: italic; }
+.rec-warn { font-size: 0.85rem; line-height: 1.55; margin: 12px 0 0; padding: 10px 12px;
+            border-radius: 8px; background: rgba(217,119,6,0.10);
+            border: 1px solid rgba(217,119,6,0.35); }
+
+.be-wrap { margin-top: 22px; }
+.be-cap { font-size: 0.78rem; text-transform: uppercase; letter-spacing: .06em;
+          opacity: .65; margin-bottom: 8px; }
+.be { width: 100%; height: auto; display: block; }
+.be-track { stroke: var(--border-color-primary); stroke-width: 4; stroke-linecap: round; }
+.be-join { stroke: var(--c-dumb); stroke-width: 2; stroke-opacity: .55; }
+.be-yours { fill: var(--background-fill-primary); stroke: var(--c-dumb); stroke-width: 2; }
+.be-req { fill: var(--c-dumb); stroke: var(--background-fill-primary); stroke-width: 2; }
+.be-label { font-size: 12px; font-weight: 550; fill: var(--body-text-color);
+            text-anchor: end; }
+.be-verdict { font-size: 10.5px; font-weight: 650; text-anchor: end; }
+.be-reason { font-size: 10.5px; fill: var(--body-text-color-subdued); }
+.be-num { font-size: 11px; fill: var(--body-text-color); font-weight: 550;
+          font-variant-numeric: tabular-nums; }
+.be-na { font-size: 10.5px; fill: var(--body-text-color-subdued); font-style: italic; }
+.be-summary { font-size: 0.85rem; line-height: 1.55; margin: 10px 0 0;
+              color: var(--body-text-color); }
+
+:root { --c-dumb: #2a78d6; }
+@media (prefers-color-scheme: dark) { :root { --c-dumb: #3987e5; } }
+.dark { --c-dumb: #3987e5; }
+html:not(.dark) { --c-dumb: #2a78d6; }
+
+/* --- scenario panel --- */
+.sp-wrap { margin-top: 6px; }
+.sp { width: 100%; height: auto; display: block; }
+.sp-grid { stroke: var(--border-color-primary); stroke-width: 1; }
+.sp-bar-r { fill: var(--c-l); }
+.sp-name { font-size: 11.5px; font-weight: 550; fill: var(--body-text-color);
+           text-anchor: end; }
+.sp-val { font-size: 11px; fill: var(--body-text-color); font-weight: 550;
+          font-variant-numeric: tabular-nums; }
+.sp-na { font-size: 11px; fill: var(--body-text-color-subdued); font-style: italic; }
+.sp-tick { font-size: 10.5px; fill: var(--body-text-color-subdued); text-anchor: middle; }
+
+/* probability allocation bar: ordinal grey ramp, read-only */
+.sp-bar { display: flex; width: 100%; height: 30px; border-radius: 6px;
+          overflow: hidden; margin: 2px 0 10px; gap: 2px;
+          background: var(--border-color-primary); }
+.sp-seg { display: flex; align-items: center; justify-content: center;
+          background: var(--c-l); min-width: 0; }
+.sp-seg-l { font-size: 0.72rem; font-weight: 600; color: var(--ink-l);
+            white-space: nowrap; overflow: hidden; padding: 0 4px;
+            letter-spacing: .01em; }
+.sp-note { font-size: 0.8rem; color: var(--body-text-color-subdued);
+           margin: 8px 0 0; line-height: 1.5; }
+.sp-partial { color: #d97706; font-weight: 600; }
+
+@media (prefers-color-scheme: dark) {
+  .sp-bar-r { fill: var(--c-d); }
+  .sp-seg { background: var(--c-d); }
+  .sp-seg-l { color: var(--ink-d); }
+}
+.dark .sp-bar-r { fill: var(--c-d); }
+.dark .sp-seg { background: var(--c-d); }
+.dark .sp-seg-l { color: var(--ink-d); }
+html:not(.dark) .sp-bar-r { fill: var(--c-l); }
+html:not(.dark) .sp-seg { background: var(--c-l); }
+html:not(.dark) .sp-seg-l { color: var(--ink-l); }
 
 /* --- sensitivity heatmap --- */
 .hm-scroll { overflow-x: auto; }
@@ -316,11 +458,133 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
       <tr class="total"><td>Intrinsic value per share</td><td>${r.value_per_share:,.2f}</td></tr>
     </table>
     """
-    return (f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
+    return (f'{render_warnings(r.warnings)}'
+            f'<div class="kpi-grid">{kpis}</div>{_projection_table(r)}{bridge}',
             render_projection_chart(r),
             render_waterfall(r),
             heat,
             margin_heat)
+
+
+# Bear and bull open as deliberate deviations from the working model. Only the
+# fields listed differ; everything else takes the standard opening value.
+BEAR_DEFAULTS = dict(y1_growth=25.0, y5_growth=5.0, y5_margin=45.0, wacc=12.0, terminal=2.0)
+BULL_DEFAULTS = dict(y1_growth=75.0, y5_growth=25.0, y5_margin=65.0, wacc=9.0, terminal=4.0)
+CUT_A_DEFAULT, CUT_B_DEFAULT = 25.0, 75.0
+
+#: Controls in one assumption panel. Four panels exist: the left pane plus one per case.
+CASE_PANEL_SIZE = 21
+
+
+def assumptions_from_panel(values) -> dict:
+    """One panel's 21 slider values, in panel order, as a complete run_dcf dict.
+
+    Percentages in, decimals out. Returns every keyword `run_dcf` needs, so the
+    caller can value a case directly rather than merging overrides onto a base --
+    see `weighted_valuation_from_cases` for why that distinction matters.
+    """
+    (forecast_mode, y1g, y5g, g1, g2, g3, g4, g5, y1m, y5m,
+     m1, m2, m3, m4, m5, net_capex_pct, nwc_pct, tax_pct, wacc_pct,
+     terminal_pct, years) = values
+    per_year = forecast_mode == PER_YEAR
+    return dict(
+        year_1_growth=y1g / 100,
+        year_5_growth=y5g / 100,
+        growth_rates=[v / 100 for v in (g1, g2, g3, g4, g5)] if per_year else None,
+        year_1_margin=y1m / 100,
+        year_5_margin=y5m / 100,
+        operating_margins=[v / 100 for v in (m1, m2, m3, m4, m5)] if per_year else None,
+        tax_rate=tax_pct / 100,
+        net_capex_pct=net_capex_pct / 100,
+        nwc_pct_of_growth=nwc_pct / 100,
+        wacc=wacc_pct / 100,
+        terminal_growth=terminal_pct / 100,
+        horizon=int(years),
+    )
+
+
+def build_scenarios(cut_a, cut_b, base_values, bear_values, bull_values):
+    """Weight three complete, independent cases. Returns (panel, probability bar)."""
+    cases = {
+        "Base": assumptions_from_panel(base_values),
+        "Bear": assumptions_from_panel(bear_values),
+        "Bull": assumptions_from_panel(bull_values),
+    }
+    p_bear, p_base, p_bull = probability_split(cut_a, cut_b)
+    wv = weighted_valuation_from_cases([
+        ("Bear", p_bear, cases["Bear"]),
+        ("Base", p_base, cases["Base"]),
+        ("Bull", p_bull, cases["Bull"]),
+    ])
+    bar = render_probability_bar((p_bear, p_base, p_bull))
+
+    if wv.all_failed:
+        return ('<div class="warn"><strong>No scenario can be valued.</strong><br>'
+                "Every case has WACC at or below its terminal growth.</div>", bar)
+
+    rec = recommend(wv, BUY_ABOVE, SELL_BELOW)
+    signal = signal_for(wv.upside)
+    color, bg = SIGNAL_COLORS[signal]
+    kpis = "".join([
+        _kpi("Probability-weighted value", f"${wv.weighted_value:,.2f}",
+             f"vs. ${wv.current_price:,.2f} market price"),
+        _kpi("Upside" if wv.upside >= 0 else "Downside", f"{wv.upside:+.1%}",
+             f"on the weighted mean alone: {signal}", color=color, bg=bg),
+        _kpi("P(worth more than price)", f"{wv.probability_above_price:.0%}",
+             "summed probability of the cases above it"),
+    ])
+
+    body = ""
+    for s in wv.scenarios:
+        if s.result is None:
+            body += (f'<tr><td>{s.name}</td><td>{s.probability:.0%}</td>'
+                     f'<td colspan="3">cannot be valued</td></tr>')
+            continue
+        flag = ""
+        if s.result.warnings:
+            codes = ", ".join(w.code.replace("_", " ") for w in s.result.warnings)
+            flag = (f' <span class="case-flag" title="{codes}">&#9888;</span>')
+        body += (
+            f'<tr><td>{s.name}{flag}</td><td>{s.weight:.0%}</td>'
+            f'<td>${s.result.value_per_share:,.2f}</td>'
+            f'<td>{s.result.upside:+.1%}</td>'
+            f'<td>${s.contribution:,.2f}</td></tr>'
+        )
+
+    partial = ""
+    valued = [s for s in wv.scenarios if s.result]
+    if wv.valued_mass < 0.999:
+        partial = (f'<span class="sp-partial">Weighted over {len(valued)} of '
+                   f'{len(wv.scenarios)} cases ({wv.valued_mass:.0%} of probability '
+                   f'mass).</span> ')
+
+    return (
+        # Recommendation and the three tiles share a row, tiles stacked on the right.
+        # Same 3fr/2fr split as the chart and table below, so the column edge runs
+        # straight down the panel.
+        f'<div class="sp-head">'
+        f'  {render_recommendation(rec, wv.current_price)}'
+        f'  <div class="kpi-stack">{kpis}</div>'
+        f'  <div class="sp-head-drivers">'
+        f'    {render_break_even(break_even(cases["Base"], wv.current_price), wv.current_price)}'
+        f'  </div>'
+        f'</div>'
+        # Chart and table side by side rather than stacked: the panel was long enough
+        # to scroll, and the two are read together anyway. A CSS grid does this because
+        # the whole panel is one gr.HTML string, not separate Gradio columns.
+        f'<div class="sp-split">'
+        f'  <div class="sp-split-chart">{render_scenario_panel(wv)}</div>'
+        f'  <div class="sp-split-table">'
+        f'    <table class="bridge compact"><caption>By scenario</caption>'
+        f'    <tr><td>Case</td><td>Weight</td><td>Value</td><td>vs price</td>'
+        f'    <td>Contribution</td></tr>{body}</table>'
+        f'  </div>'
+        f'</div>'
+        f'<p class="sp-note">{partial}Weighting applies to the <em>values</em>, not the '
+        f'assumptions &mdash; the model is non-linear, so averaging the inputs and '
+        f'valuing once would give a materially different answer.</p>',
+        bar,
+    )
 
 
 with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
@@ -331,94 +595,202 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         f"price ${NVDA_DEFAULTS['current_price']:.2f}. Move a slider to revalue."
     )
 
+    def assumption_panel(defaults=None):
+        """One complete 21-control assumption panel.
+
+        Returns the controls in `valuate`'s parameter order, plus the four groups
+        the taper/per-year toggle shows and hides. Four of these exist -- the left
+        pane and one per case -- built from this single definition so the panels
+        cannot drift apart.
+        """
+        d = defaults or {}
+        gr.Markdown("### Forecast detail")
+        panel_mode = gr.Radio([TAPER, PER_YEAR], value=TAPER,
+                              label="Growth & margin inputs")
+
+        gr.Markdown("### Revenue growth")
+        with gr.Group() as growth_taper_group:
+            y1g = gr.Slider(-20, 100, d.get("y1_growth", 50), step=0.25,
+                            label="Year 1 revenue growth (%)")
+            y5g = gr.Slider(-10, 60, d.get("y5_growth", 15), step=0.25,
+                            label="Year 5 revenue growth (%)")
+        with gr.Group(visible=False) as growth_year_group:
+            growth = [gr.Slider(-20, 100, GROWTH_BY_YEAR[i], step=0.25,
+                                label=f"Year {i + 1} revenue growth (%)")
+                      for i in range(5)]
+
+        gr.Markdown("### Operating margin")
+        with gr.Group() as margin_taper_group:
+            y1m = gr.Slider(0, 90, d.get("y1_margin", 62.4), step=0.05,
+                            label="Year 1 operating margin (%)")
+            y5m = gr.Slider(0, 90, d.get("y5_margin", 55), step=0.05,
+                            label="Year 5 operating margin (%)")
+        with gr.Group(visible=False) as margin_year_group:
+            margins = [gr.Slider(0, 90, MARGIN_BY_YEAR[i], step=0.05,
+                                 label=f"Year {i + 1} operating margin (%)")
+                       for i in range(5)]
+
+        gr.Markdown("### Cash flow")
+        capex = gr.Slider(0, 25, d.get("net_capex", 1.5), step=0.1,
+                          label="Net capex (% of revenue)")
+        work_cap = gr.Slider(0, 50, d.get("nwc", 10), step=0.5,
+                             label="Working capital (% of revenue growth)")
+        tax = gr.Slider(0, 40, d.get("tax", 15), step=0.5, label="Tax rate (%)")
+
+        gr.Markdown("### Discount rate")
+        discount = gr.Slider(4, 20, d.get("wacc", 10), step=0.25, label="WACC (%)")
+        terminal = gr.Slider(0, 6, d.get("terminal", 3), step=0.1,
+                             label="Terminal growth (%)")
+        years = gr.Slider(5, 20, d.get("horizon", 10), step=1, label="Forecast years")
+
+        controls = [panel_mode, y1g, y5g, *growth, y1m, y5m, *margins,
+                    capex, work_cap, tax, discount, terminal, years]
+        groups = (growth_taper_group, growth_year_group,
+                  margin_taper_group, margin_year_group)
+        return controls, panel_mode, groups
+
+    def view_tabs():
+        """The five views of one model. Returns their HTML components in panel order."""
+        with gr.Tabs():
+            with gr.Tab("Valuation"):
+                val = gr.HTML()
+            with gr.Tab("Projection"):
+                proj = gr.HTML()
+                gr.Markdown(
+                    "Free cash flow climbs every year, but its **present value** "
+                    "peaks mid-forecast and then falls: past that point discounting "
+                    "outruns growth. That is why so much of the valuation ends up "
+                    "in the terminal value rather than the years you projected."
+                )
+            with gr.Tab("Valuation Waterfall"):
+                fall = gr.HTML()
+                gr.Markdown(
+                    "Each bar is a contribution to equity value. **Blue adds, red "
+                    "subtracts, grey is a running total** &mdash; the same meaning "
+                    "those colours carry in the sensitivity grid."
+                )
+            with gr.Tab("Sensitivity - WACC vs. Terminal Growth"):
+                grid_wacc = gr.HTML()
+                gr.Markdown(
+                    "Each cell revalues the company at that WACC and terminal growth "
+                    "rate, holding every other assumption fixed. Blue is worth more "
+                    "than the market price, red is worth less."
+                )
+            with gr.Tab("Sensitivity - Operating Margin vs. Terminal Growth"):
+                grid_margin = gr.HTML()
+                gr.Markdown(
+                    "The same grid against margin instead of discount rate. The column "
+                    "axis is the **Year-5 operating margin** &mdash; the level that "
+                    "holds flat from Year 5 into perpetuity."
+                )
+        return [val, proj, fall, grid_wacc, grid_margin]
+
+    # The toggle governs the whole layout, so it sits at page level rather than on top
+    # of one column -- and the split it controls lives in the same box, appearing only
+    # when the box is checked. No "Probability split" heading: the checkbox's own
+    # label and note already say what this is.
+    #
+    # A plain Column, not a Group: Group paints the secondary grey fill, and Gradio
+    # wraps the checkbox in its own bordered `form` inside that, so the two nested.
+    # Here the Column carries the only border and the inner form's box is flattened
+    # in CSS, which leaves one container holding both controls.
+    with gr.Column(elem_classes="mode-box"):
+        scenario_mode = gr.Checkbox(
+            value=False, label="Scenario analysis",
+            info="Split the model into independent bear, base and bull cases",
+        )
+        with gr.Column(visible=False) as probability_panel:
+            gr.Markdown(
+                "Two cut points on a 0&ndash;100 axis, so the three probabilities "
+                "always sum to 100 by construction.",
+                elem_classes="mode-note",
+            )
+            probability_bar = gr.HTML()
+            with gr.Row():
+                cut_a = gr.Slider(0, 100, CUT_A_DEFAULT, step=1,
+                                  label="Bear / Base boundary")
+                cut_b = gr.Slider(0, 100, CUT_B_DEFAULT, step=1,
+                                  label="Base / Bull boundary")
+
     with gr.Row():
-        # Sliders sit outside the tabs so one set of assumptions scopes both views.
-        with gr.Column(scale=2):
-            gr.Markdown("### Forecast detail")
-            mode = gr.Radio([TAPER, PER_YEAR], value=TAPER, label="Growth & margin inputs")
-
-            gr.Markdown("### Revenue growth")
-            with gr.Group() as growth_taper_group:
-                y1_growth = gr.Slider(-20, 100, 50, step=0.25, label="Year 1 revenue growth (%)")
-                y5_growth = gr.Slider(-10, 60, 15, step=0.25, label="Year 5 revenue growth (%)")
-
-            with gr.Group(visible=False) as growth_year_group:
-                growth_sliders = [
-                    gr.Slider(-20, 100, GROWTH_BY_YEAR[i], step=0.25,
-                              label=f"Year {i + 1} revenue growth (%)")
-                    for i in range(5)
-                ]
-
-            gr.Markdown("### Operating margin")
-            with gr.Group() as margin_taper_group:
-                y1_margin = gr.Slider(0, 90, 62.4, step=0.05, label="Year 1 operating margin (%)")
-                y5_margin = gr.Slider(0, 90, 55, step=0.05, label="Year 5 operating margin (%)")
-
-            with gr.Group(visible=False) as margin_year_group:
-                margin_sliders = [
-                    gr.Slider(0, 90, MARGIN_BY_YEAR[i], step=0.05,
-                              label=f"Year {i + 1} operating margin (%)")
-                    for i in range(5)
-                ]
-
-            gr.Markdown("### Cash flow")
-            net_capex = gr.Slider(0, 25, 1.5, step=0.1, label="Net capex (% of revenue)")
-            nwc = gr.Slider(0, 50, 10, step=0.5, label="Working capital (% of revenue growth)")
-            tax_rate = gr.Slider(0, 40, 15, step=0.5, label="Tax rate (%)")
-
-            gr.Markdown("### Discount rate")
-            wacc = gr.Slider(4, 20, 10, step=0.25, label="WACC (%)")
-            terminal_growth = gr.Slider(0, 6, 3, step=0.1, label="Terminal growth (%)")
-            horizon = gr.Slider(5, 20, 10, step=1, label="Forecast years")
+        # The column itself is what the toggle hides, not an inner wrapper: with it
+        # out of the flex flow its scale=3 sibling becomes the row's only laid-out
+        # child and takes the full width.
+        #
+        # Two assumption panels exist for the base case: this one, authoritative when
+        # the mode is off, and the one inside the Base tab, authoritative when it is
+        # on. Gradio cannot move a component between containers, so the toggle copies
+        # values across once instead -- one direction only, so there is no sync loop.
+        with gr.Column(scale=2, visible=True) as assumptions_column:
+            all_inputs, global_mode, global_groups = assumption_panel()
 
         with gr.Column(scale=3):
-            with gr.Tabs():
-                with gr.Tab("Valuation"):
-                    results = gr.HTML()
-                with gr.Tab("Projection"):
-                    chart = gr.HTML()
-                    gr.Markdown(
-                        "Free cash flow climbs every year, but its **present value** "
-                        "peaks mid-forecast and then falls: past that point discounting "
-                        "outruns growth. That is why so much of the valuation ends up "
-                        "in the terminal value rather than the years you projected."
-                    )
-                with gr.Tab("Valuation Waterfall"):
-                    waterfall = gr.HTML()
-                    gr.Markdown(
-                        "Each bar is a contribution to equity value. **Blue adds, red "
-                        "subtracts, grey is a running total** &mdash; the same meaning "
-                        "those colours carry in the sensitivity grid. Note how far the "
-                        "terminal value bar reaches next to every projected year "
-                        "combined."
-                    )
-                with gr.Tab("Sensitivity - WACC vs. Terminal Growth"):
-                    heatmap = gr.HTML()
-                    gr.Markdown(
-                        "Each cell revalues the company at that WACC and terminal growth "
-                        "rate, holding every other assumption at your slider settings. "
-                        "Blue is worth more than the market price, red is worth less."
-                    )
-                with gr.Tab("Sensitivity - Operating Margin vs. Terminal Growth"):
-                    margin_heatmap = gr.HTML()
-                    gr.Markdown(
-                        "The same grid against margin instead of discount rate. The "
-                        "column axis is the **Year-5 operating margin** &mdash; the level "
-                        "that holds flat from Year 5 into perpetuity &mdash; so both axes "
-                        "here govern the terminal economics. Year-1 margin stays wherever "
-                        "you set it. Rows match the other sensitivity tab, so the two "
-                        "grids can be read against each other."
-                    )
+            # Two sibling Tabs containers rather than one container with tabs shown
+            # and hidden individually. Per-tabitem visibility did not take effect in
+            # the browser -- the update payload was correct, but the tab bar kept
+            # rendering the hidden tabs -- and toggling a whole gr.Tabs is a plain
+            # show/hide of one element instead of a tab-bar re-render. It also means
+            # no hidden tab can ever be the selected one, which is what left the
+            # right-hand pane blank on first load.
+            with gr.Tabs(visible=True) as single_model_tabs:
+                single_views = []
+                for label, tab_id in [
+                    ("Valuation", "valuation"),
+                    ("Projection", "projection"),
+                    ("Valuation Waterfall", "waterfall"),
+                    ("Sensitivity - WACC vs. Terminal Growth", "sens_wacc"),
+                    ("Sensitivity - Operating Margin vs. Terminal Growth", "sens_margin"),
+                ]:
+                    with gr.Tab(label, id=tab_id):
+                        single_views.append(gr.HTML())
+                        if tab_id == "projection":
+                            gr.Markdown(
+                                "Free cash flow climbs every year, but its **present "
+                                "value** peaks mid-forecast and then falls: past that "
+                                "point discounting outruns growth."
+                            )
 
-    # Every slider stays wired in regardless of visibility -- hidden components keep
-    # their values, and `mode` decides which set the model actually reads.
-    #
-    # This list's order must match valuate()'s parameter order exactly; Gradio binds
-    # them positionally. test_app_wiring.py asserts the two stay in step.
-    all_inputs = [mode,
-                  y1_growth, y5_growth, *growth_sliders,
-                  y1_margin, y5_margin, *margin_sliders,
-                  net_capex, nwc, tax_rate, wacc, terminal_growth, horizon]
+            # Scenarios is simply the first tab of its own container, so it leads and
+            # opens active without any `selected` juggling.
+            with gr.Tabs(visible=False) as scenario_model_tabs:
+                with gr.Tab("Scenarios", id="scenarios"):
+                    scenario_panel = gr.HTML()
+
+                case_inputs, case_views, case_modes, case_groups = {}, {}, {}, {}
+                for case, case_id, defaults in [
+                    ("Base", "case_base", None),
+                    ("Bear", "case_bear", BEAR_DEFAULTS),
+                    ("Bull", "case_bull", BULL_DEFAULTS),
+                ]:
+                    with gr.Tab(case, id=case_id):
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                controls, panel_mode, groups = assumption_panel(defaults)
+                            with gr.Column(scale=3):
+                                views = view_tabs()
+                    case_inputs[case] = controls
+                    case_views[case] = views
+                    case_modes[case] = panel_mode
+                    case_groups[case] = groups
+
+    # --- handlers -------------------------------------------------------------
+
+    def settles(components):
+        """Trigger when a control settles rather than on every step of a drag.
+
+        A slider's `.change` fires continuously while the handle moves. Each firing
+        ships ~62KB of HTML across seven components and re-renders 126 heatmap cells
+        and two SVGs, so a drag queues a stream of full round trips and the panels
+        crawl or appear to hang. Compute is only ~11ms -- the cost is all payload and
+        DOM work, so the fix is to fire once per gesture. `.release` does that for
+        sliders; radios and checkboxes have no release event and are cheap anyway.
+        """
+        return [c.release if isinstance(c, gr.Slider) else c.change
+                for c in components]
+
+    # Progress animation is counter-productive here: the work takes milliseconds, and
+    # a spinner covering the output on every update is what reads as "queuing".
+    QUIET = "hidden"
 
     def valuate(
         forecast_mode,
@@ -444,23 +816,98 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         )
 
     gr.on(
-        triggers=[c.change for c in all_inputs] + [demo.load],
+        triggers=settles(all_inputs) + [demo.load],
         fn=valuate,
         inputs=all_inputs,
-        outputs=[results, chart, waterfall, heatmap, margin_heatmap],
+        outputs=single_views,
+        show_progress=QUIET,
     )
 
-    def switch_mode(selected):
-        """One toggle, four groups: growth and margin each show taper or per-year."""
+    # The same function, registered once per case. Each case's panel drives only its
+    # own views, so moving a bear slider does not recompute the base or bull grids.
+    for case in ("Base", "Bear", "Bull"):
+        gr.on(
+            triggers=settles(case_inputs[case]) + [demo.load],
+            fn=valuate,
+            inputs=case_inputs[case],
+            outputs=case_views[case],
+            show_progress=QUIET,
+        )
+
+    scenario_all = [cut_a, cut_b, *case_inputs["Base"],
+                    *case_inputs["Bear"], *case_inputs["Bull"]]
+
+    def evaluate_scenarios(*values):
+        """Two cut points followed by three complete panels, in Base/Bear/Bull order.
+
+        Taken as *values rather than 65 named parameters: the slice boundaries are
+        asserted in test_app_wiring.py, which is a sturdier guard than a signature
+        that long.
+        """
+        size = CASE_PANEL_SIZE
+        cut_a_pct, cut_b_pct = values[0], values[1]
+        base = values[2:2 + size]
+        bear = values[2 + size:2 + 2 * size]
+        bull = values[2 + 2 * size:2 + 3 * size]
+        return build_scenarios(cut_a_pct, cut_b_pct, base, bear, bull)
+
+    gr.on(
+        triggers=settles(scenario_all) + [demo.load],
+        fn=evaluate_scenarios,
+        inputs=scenario_all,
+        outputs=[scenario_panel, probability_bar],
+        show_progress=QUIET,
+    )
+
+    def switch_detail(selected):
+        """One radio, four groups: growth and margin each show taper or per-year."""
         taper = gr.update(visible=selected == TAPER)
         per_year = gr.update(visible=selected == PER_YEAR)
         return taper, per_year, taper, per_year
 
-    mode.change(
-        fn=switch_mode,
-        inputs=mode,
-        outputs=[growth_taper_group, growth_year_group,
-                 margin_taper_group, margin_year_group],
+    for panel_mode, groups in [(global_mode, global_groups)] + [
+        (case_modes[c], case_groups[c]) for c in ("Base", "Bear", "Bull")
+    ]:
+        panel_mode.change(fn=switch_detail, inputs=panel_mode, outputs=list(groups))
+
+    # Dragging one cut point past the other pushes it along, the way a segmented bar
+    # behaves. probability_split clamps too, so this is presentation only.
+    cut_a.release(fn=lambda a, b: gr.update(value=max(a, b)), inputs=[cut_a, cut_b],
+                  outputs=cut_b, show_progress=QUIET)
+    cut_b.release(fn=lambda a, b: gr.update(value=min(a, b)), inputs=[cut_a, cut_b],
+                  outputs=cut_a, show_progress=QUIET)
+
+    mode_toggle_inputs = [scenario_mode, *all_inputs, *case_inputs["Base"]]
+    mode_toggle_outputs = (
+        [assumptions_column, probability_panel, single_model_tabs, scenario_model_tabs]
+        + all_inputs
+        + case_inputs["Base"]
+    )
+
+    def toggle_scenario_mode(on, *values):
+        """Show one layout or the other, and carry the base assumptions across.
+
+        Whichever base panel is becoming authoritative is the source: turning the
+        mode on copies the left pane into the Base tab, turning it off copies it
+        back. Both panels are written from that one source, so the copy can only
+        flow one way and there is no loop.
+        """
+        size = CASE_PANEL_SIZE
+        left_values, base_values = values[:size], values[size:2 * size]
+        source = left_values if on else base_values
+
+        return (
+            [gr.update(visible=not on), gr.update(visible=on),
+             gr.update(visible=not on), gr.update(visible=on)]
+            + [gr.update(value=v) for v in source]
+            + [gr.update(value=v) for v in source]
+        )
+
+    scenario_mode.change(
+        fn=toggle_scenario_mode,
+        inputs=mode_toggle_inputs,
+        outputs=mode_toggle_outputs,
+        show_progress=QUIET,
     )
 
 if __name__ == "__main__":
