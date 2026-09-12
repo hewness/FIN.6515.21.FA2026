@@ -25,6 +25,27 @@ Then open **http://127.0.0.1:7860**.
 
 The server runs in the foreground; stop it with Ctrl+C.
 
+## Hosted demo
+
+The app runs as a Gradio Space at
+**https://huggingface.co/spaces/hewness/nvidia-dcf-valuation** (currently private).
+
+Deploy or redeploy with:
+
+```
+.venv\Scripts\python.exe deploy_space.py hewness/nvidia-dcf-valuation
+```
+
+`deploy_space.py` stages `app.py`, `dcf.py` and `viz.py` together with `space/README.md`
+(which carries the Space's required YAML frontmatter) and `space/requirements.txt` into a
+temporary directory, then uploads that. Nothing is copied into the working tree, so the
+Space cannot drift from the modules it was built out of, and the Space card cannot collide
+with this README.
+
+`space/requirements.txt` is deliberately empty of runtime dependencies: the app imports
+only `gradio`, which Spaces preinstalls and manages, plus the standard library. The DCF
+math and every chart are hand-rolled, so there is no numpy, pandas or plotly to install.
+
 ## Tests
 
 ```

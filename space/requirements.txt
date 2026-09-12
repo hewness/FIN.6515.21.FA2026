@@ -1,0 +1,8 @@
+# Intentionally empty of runtime dependencies.
+#
+# The app imports only `gradio` plus the Python standard library, and Spaces
+# preinstalls and manages gradio itself -- pinning it here causes resolution
+# failures. `dcf.py` and `viz.py` are pure stdlib: the DCF math and every chart
+# are hand-rolled SVG, so there is no numpy/pandas/plotly to install.
+#
+# pytest is deliberately absent; the test suite runs in the GitHub repo, not here.

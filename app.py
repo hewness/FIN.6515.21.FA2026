@@ -1,5 +1,7 @@
 """Interactive DCF valuation app for NVIDIA."""
 
+import os
+
 import gradio as gr
 
 from dcf import (
@@ -968,4 +970,11 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860, css=CSS)
+    # Hugging Face Spaces runs this file directly and needs the server bound to all
+    # interfaces; locally it stays on loopback so the app is not exposed to the network.
+    on_spaces = bool(os.getenv("SPACE_ID"))
+    demo.launch(
+        server_name="0.0.0.0" if on_spaces else "127.0.0.1",
+        server_port=int(os.getenv("PORT", "7860")),
+        css=CSS,
+    )
