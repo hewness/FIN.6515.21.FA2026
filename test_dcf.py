@@ -508,8 +508,10 @@ def test_every_driver_is_defensible_at_the_market_price():
     assert all(r.verdict == DEFENSIBLE for r in rows.values()), {
         k: (r.required, r.verdict) for k, r in rows.items()}
     # and each required value sits close to where the slider already is
+    # Year-1 growth is the loosest at 4.7pp, because it is the weakest single lever:
+    # moving one year of a ten-year forecast has to move a long way to shift the answer.
     for key, row in rows.items():
-        assert abs(row.required - row.base) < 0.03, key
+        assert abs(row.required - row.base) < 0.05, key
 
 
 def test_plausibility_verdicts_fire_on_their_thresholds():
@@ -530,10 +532,14 @@ def test_plausibility_verdicts_fire_on_their_thresholds():
     assert rows["terminal_growth"].required is None
     assert rows["terminal_growth"].verdict == IMPOSSIBLE
 
-    # growth routes imply more revenue than the whole industry is forecast to reach
-    for key in ("year_1_growth", "year_5_growth"):
-        assert rows[key].verdict == DEMANDING
-        assert f"{GLOBAL_SEMI_REVENUE:,.0f}" in rows[key].reason
+    # both growth routes are demanding, but for different and appropriate reasons
+    assert rows["year_5_growth"].verdict == DEMANDING
+    assert f"{GLOBAL_SEMI_REVENUE:,.0f}" in rows["year_5_growth"].reason
+    # Year 1 is judged against the half-year already banked and guided, not against a
+    # far-future industry total -- moving Year 1 alone barely shifts the final year, so
+    # the industry ceiling would wave through a required $618B FY2027.
+    assert rows["year_1_growth"].verdict == DEMANDING
+    assert "already banked or guided" in rows["year_1_growth"].reason
 
     # and the WACC route needs a discount rate below the CAPM floor
     assert rows["wacc"].required < MIN_CREDIBLE_WACC
@@ -939,3 +945,102 @@ def test_the_base_case_revenue_path_stays_inside_the_exhibit_tam():
     # the bear takes roughly half the market, the bull holds near its 2023 peak
     assert fy2031["Bear"] / accelerator_tam_2030 == pytest.approx(0.51, abs=0.05)
     assert fy2031["Bull"] / accelerator_tam_2030 == pytest.approx(0.94, abs=0.05)
+
+
+# --- the growth axis means one thing in both input modes ----------------------
+
+def test_growth_axis_is_not_inert_in_per_year_mode():
+    """The trap `apply_year_5_margin` was written for, one axis over.
+
+    An explicit `growth_rates` list wins over the keyword inside `run_dcf`, so an
+    axis built by keyword assignment swept 50%-90% and returned $194.91 at every
+    step -- seven identical columns, rendered without complaint.
+    """
+    from dcf import _apply_axis, growth_schedule
+
+    per_year = dict(growth_rates=growth_schedule(0.8225, 0.0025, 0.03, 10)[:5])
+    values = [run_dcf(**_apply_axis(per_year, "year_1_growth", g)).value_per_share
+              for g in (0.50, 0.70, 0.90)]
+    assert len(set(round(v, 2) for v in values)) == 3, values
+    assert values[0] < values[1] < values[2]
+
+
+def test_the_growth_axis_agrees_across_both_input_modes():
+    """Otherwise the same question gets two answers depending on a radio button.
+
+    In taper mode the keyword is the taper's *endpoint*, so a plain assignment drags
+    years 2-4 along and returns $118.72 where per-year mode returns $161.38.
+    """
+    from dcf import _apply_axis, growth_schedule
+
+    taper = dict(year_1_growth=0.8225, year_5_growth=0.0025)
+    per_year = dict(growth_rates=growth_schedule(0.8225, 0.0025, 0.03, 10)[:5])
+    for g in (0.50, 0.6425, 0.95, 1.10):
+        a = run_dcf(**_apply_axis(taper, "year_1_growth", g)).value_per_share
+        b = run_dcf(**_apply_axis(per_year, "year_1_growth", g)).value_per_share
+        assert a == pytest.approx(b, abs=0.01), g
+
+
+def test_the_growth_axis_moves_only_the_year_it_names():
+    """Years 2-5 keep their own rates; only the revenue base they build on shifts."""
+    from dcf import _apply_axis
+
+    base = run_dcf()
+    moved = run_dcf(**_apply_axis({}, "year_1_growth", 0.50))
+    assert moved.rows[0].growth_rate == pytest.approx(0.50)
+    for i in range(1, 10):
+        assert moved.rows[i].growth_rate == pytest.approx(base.rows[i].growth_rate), i
+    # but revenue compounds, so every later year is lower
+    assert all(m.revenue < b.revenue for m, b in zip(moved.rows, base.rows))
+
+
+def test_year_5_growth_axis_gets_the_same_treatment():
+    from dcf import _apply_axis, growth_schedule
+
+    per_year = dict(growth_rates=growth_schedule(0.8225, 0.0025, 0.03, 10)[:5])
+    lo = run_dcf(**_apply_axis(per_year, "year_5_growth", -0.05)).value_per_share
+    hi = run_dcf(**_apply_axis(per_year, "year_5_growth", 0.20)).value_per_share
+    assert lo < hi
+    moved = run_dcf(**_apply_axis({}, "year_5_growth", 0.20))
+    assert moved.rows[4].growth_rate == pytest.approx(0.20)
+    assert moved.rows[0].growth_rate == pytest.approx(run_dcf().rows[0].growth_rate)
+
+
+def test_wacc_against_revenue_growth_grid_behaves():
+    """Monotonic both ways, which is what makes the diverging colour scale readable."""
+    wacc_axis = [0.08, 0.10, 0.12, 0.14]
+    growth_axis = [0.50, 0.70, 0.90, 1.10]
+    grid = sensitivity_grid("wacc", wacc_axis, "year_1_growth", growth_axis,
+                            terminal_growth=0.03)
+    assert len(grid) == len(growth_axis)
+    assert all(len(row) == len(wacc_axis) for row in grid)
+    assert all(cell is not None for row in grid for cell in row)
+    for row in grid:                                  # value falls as WACC rises
+        vals = [c.value_per_share for c in row]
+        assert vals == sorted(vals, reverse=True)
+    for col in range(len(wacc_axis)):                 # and rises with growth
+        vals = [grid[r][col].value_per_share for r in range(len(growth_axis))]
+        assert vals == sorted(vals)
+
+
+def test_year_one_break_even_is_judged_against_guided_revenue():
+    """The industry ceiling alone waves through an absurd Year-1 figure.
+
+    Moving Year 1 on its own barely shifts the final year, so a required 186% growth
+    left FY2036 revenue at $1,876B -- just under the $1,900B ceiling -- and the row
+    read 'defensible' while implying a $618B FY2027 against $173B already committed.
+    """
+    from dcf import (MAX_H2_RUN_RATE_MULTIPLE, Q1_FY2027_ACTUAL,
+                     Q2_FY2027_GUIDANCE, _apply_axis)
+
+    rows = {r.key: r for r in break_even({}, CONSENSUS_TARGET)}
+    row = rows["year_1_growth"]
+    assert row.verdict == DEMANDING
+    assert "already banked or guided" in row.reason
+
+    # the threshold leaves every case the exhibits support alone
+    committed = Q1_FY2027_ACTUAL + Q2_FY2027_GUIDANCE
+    for growth in (0.6425, 0.8225, 0.95):             # bear floor, consensus, bull
+        year_one = run_dcf(**_apply_axis({}, "year_1_growth", growth)).rows[0].revenue
+        implied_quarter = (year_one - committed) / 2
+        assert implied_quarter <= Q2_FY2027_GUIDANCE * MAX_H2_RUN_RATE_MULTIPLE, growth

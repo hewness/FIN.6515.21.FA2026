@@ -52,7 +52,7 @@ math and every chart are hand-rolled, so there is no numpy, pandas or plotly to 
 .venv\Scripts\python.exe -m pytest
 ```
 
-140 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+146 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -222,6 +222,17 @@ The **Sensitivity - WACC vs. Terminal Growth** tab revalues the company across a
 WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.
+
+The **Sensitivity - WACC vs. Revenue Growth** tab covers the near term, where the other
+two both vary terminal assumptions. Its row axis is **Year-1 revenue growth**, spanning
+50-110% so it brackets the three anchors the cases are built on: the ~64% floor Q2
+guidance already puts under the year, the 82.25% consensus, and the 95% bull. Columns are
+the same WACC range as the first grid, so the two can be read against each other.
+
+Moving that axis moves **only Year 1** — years 2-5 keep their own rates. That is not a
+local change, because revenue compounds: a higher Year 1 raises the base every later year
+builds on. It does mean the axis asks one clean question, and asks the same one whether
+the panel is in taper or per-year mode.
 
 The **Sensitivity - Operating Margin vs. Terminal Growth** tab is the same grid against
 margin instead of discount rate. Its column axis is the **Year-5 operating margin** —

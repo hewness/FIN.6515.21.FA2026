@@ -72,15 +72,19 @@ def test_per_year_defaults_reproduce_the_taper():
 def test_valuate_feeds_every_panel():
     defaults = [c.value for c in app.all_inputs]
     panels = app.valuate(*defaults)
-    assert len(panels) == 5
-    valuation, chart, waterfall, heat, margin_heat = panels
+    assert len(panels) == 6
+    valuation, chart, waterfall, heat, margin_heat, growth_heat = panels
     assert "<table class=\"proj\"" in valuation
     assert 'class="chart"' in chart
     assert 'class="wf"' in waterfall
-    assert "hm-cell" in heat and "hm-cell" in margin_heat
-    # the two grids must name different axes
+    assert all("hm-cell" in g for g in (heat, margin_heat, growth_heat))
+    # the three grids must name different axis pairs
     assert "WACC &rarr;" in heat or "WACC →" in heat
     assert "Year 5 operating margin" in margin_heat
+    assert "Year 1 revenue growth" in growth_heat
+    assert "Terminal growth" in heat and "Terminal growth" in margin_heat
+    # ... and the growth grid varies WACC instead of terminal growth
+    assert "Terminal growth" not in growth_heat
 
 
 def test_both_modes_render_the_same_panels_at_defaults():
@@ -182,7 +186,7 @@ def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
     # The sensitivity grids deliberately do NOT warn: each cell is its own
     # scenario, so the grid stays useful when the centre point is unvaluable.
     # Unreachable cells render as a dash instead.
-    wacc_grid, margin_grid = grids
+    wacc_grid, margin_grid, growth_grid = grids
     for grid in grids:
         assert "Cannot value this scenario" not in grid
         assert "hm-cell" in grid
@@ -190,6 +194,8 @@ def test_guardrail_warns_in_every_panel_rather_than_half_drawing():
     assert "hm-na" in margin_grid
     # but the WACC grid varies WACC 8-14%, all of which clear 5% terminal growth
     assert "hm-na" not in wacc_grid
+    # the growth grid varies WACC too, so its columns clear 5% terminal growth as well
+    assert "hm-na" not in growth_grid
 
 
 

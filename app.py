@@ -31,6 +31,11 @@ WACC_AXIS = [0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14]
 TERMINAL_AXIS = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05]
 # Brackets the 55% Year-5 default and the 65.6% Year-1 figure from Q1 FY2027.
 MARGIN_AXIS = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+# Year-1 revenue growth. Spans the three anchors the cases are built on: the +64%
+# floor that Q2 guidance already puts under the year, the +82.25% consensus, and the
+# +95% bull. Regular 10pp steps rather than the anchors themselves, so the grid reads
+# evenly; the anchors sit between columns.
+GROWTH_AXIS = [0.50, 0.60, 0.70, 0.80, 0.90, 1.00, 1.10]
 
 TAPER, PER_YEAR = "Taper Y1 to Y5", "Set each year"
 
@@ -579,13 +584,23 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
         MARGIN_AXIS, TERMINAL_AXIS, price,
         x_label="Year 5 operating margin", y_label="Terminal growth",
     )
+    # The mirror image of the note above: this grid varies WACC, so it must NOT pass
+    # the slider's value -- but it does not vary terminal growth, so it has to pass
+    # that one through explicitly or every cell would use run_dcf's 3% default and
+    # the terminal growth slider would have no effect on this tab.
+    growth_heat = render_heatmap(
+        sensitivity_grid("wacc", WACC_AXIS, "year_1_growth", GROWTH_AXIS,
+                         terminal_growth=terminal_growth / 100, **shared),
+        WACC_AXIS, GROWTH_AXIS, price,
+        x_label="WACC", y_label="Year 1 revenue growth",
+    )
 
     try:
         r = run_dcf(wacc=wacc / 100, terminal_growth=terminal_growth / 100, **shared)
     except ValueError as exc:
         # Every panel gets the warning -- never a half-drawn chart or table.
         warning = f'<div class="warn"><strong>Cannot value this scenario.</strong><br>{exc}</div>'
-        return warning, warning, warning, heat, margin_heat
+        return warning, warning, warning, heat, margin_heat, growth_heat
 
     signal = signal_for(r.upside)
     color, bg = SIGNAL_COLORS[signal]
@@ -624,7 +639,8 @@ def build_valuation(mode, growth_taper, margin_taper, growth_years, margin_years
             render_projection_chart(r),
             render_waterfall(r),
             heat,
-            margin_heat)
+            margin_heat,
+            growth_heat)
 
 
 CUT_A_DEFAULT, CUT_B_DEFAULT = 25.0, 75.0
@@ -817,7 +833,7 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
         return controls, panel_mode, groups
 
     def view_tabs():
-        """The five views of one model. Returns their HTML components in panel order."""
+        """The six views of one model. Returns their HTML components in panel order."""
         with gr.Tabs():
             with gr.Tab("Valuation"):
                 val = gr.HTML()
@@ -850,7 +866,16 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                     "axis is the **Year-5 operating margin** &mdash; the level that "
                     "holds flat from Year 5 into perpetuity."
                 )
-        return [val, proj, fall, grid_wacc, grid_margin]
+            with gr.Tab("Sensitivity - WACC vs. Revenue Growth"):
+                grid_growth = gr.HTML()
+                gr.Markdown(
+                    "Near-term growth against the discount rate, where the other two "
+                    "grids both vary terminal assumptions. The row axis is **Year-1 "
+                    "revenue growth** &mdash; consensus puts it at 82.25%, and Q2 "
+                    "guidance already puts a floor near 64%. Columns match the "
+                    "WACC grid, so the two can be read against each other."
+                )
+        return [val, proj, fall, grid_wacc, grid_margin, grid_growth]
 
     # The toggle governs the whole layout, so it sits at page level rather than on top
     # of one column -- and the split it controls lives in the same box, appearing only
@@ -907,6 +932,7 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                     ("Valuation Waterfall", "waterfall"),
                     ("Sensitivity - WACC vs. Terminal Growth", "sens_wacc"),
                     ("Sensitivity - Operating Margin vs. Terminal Growth", "sens_margin"),
+                    ("Sensitivity - WACC vs. Revenue Growth", "sens_growth"),
                 ]:
                     with gr.Tab(label, id=tab_id):
                         single_views.append(gr.HTML())

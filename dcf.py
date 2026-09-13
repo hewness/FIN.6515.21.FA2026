@@ -20,6 +20,11 @@ HIGH_TERMINAL_MULTIPLE = 40.0      # beyond this, worth saying out loud
 # Q1 FY2027 came in at 74.9% gross / 65.6% operating, and Q2 guidance (GM 74.9% +/-50bp,
 # opex ~$8.5B on $91.0B revenue) implies 65.6% again. Using FY2026 would carry a one-off
 # through all ten forecast years.
+# Growth defaults, named for the same reason as the margin pair below: the
+# sensitivity axis has to rebuild the taper from them rather than restate the literals.
+DEFAULT_YEAR_1_GROWTH = 0.8225   # Ex 6: consensus FY2027 revenue $393.6B on FY2026's $215.9B
+DEFAULT_YEAR_5_GROWTH = 0.0025   # lands FY2031 at 78% of Ex 8's 2030 accelerator market
+
 DEFAULT_YEAR_1_MARGIN = 0.656   # Ex 2: Q1 FY2027 actual, matched by Q2 FY2027 guidance
 DEFAULT_YEAR_5_MARGIN = 0.55    # judgment: compression as custom silicon and AMD arrive
 
@@ -205,8 +210,8 @@ def margin_schedule(
 
 def run_dcf(
     revenue: float = NVDA_DEFAULTS["revenue"],
-    year_1_growth: float = 0.8225,   # Ex 6: consensus FY2027 revenue $393.6B
-    year_5_growth: float = 0.0025,   # lands FY2031 at 78% of Ex 8's 2030 accelerator TAM
+    year_1_growth: float = DEFAULT_YEAR_1_GROWTH,
+    year_5_growth: float = DEFAULT_YEAR_5_GROWTH,
     growth_rates: list[float] | None = None,
     year_1_margin: float = DEFAULT_YEAR_1_MARGIN,
     year_5_margin: float = DEFAULT_YEAR_5_MARGIN,
@@ -348,10 +353,54 @@ def apply_year_5_margin(assumptions: dict, margin: float) -> dict:
     return out
 
 
+#: Which of the five explicit growth years each growth keyword names.
+_GROWTH_YEAR_INDEX = {"year_1_growth": 0, "year_5_growth": 4}
+
+
+def apply_growth_year(assumptions: dict, index: int, growth: float) -> dict:
+    """Move one of the first five growth rates, leaving the other four alone.
+
+    The exact counterpart of `apply_year_5_margin`, and for the same two reasons:
+
+    1. An explicit `growth_rates` list wins over `year_1_growth` / `year_5_growth`
+       inside `run_dcf`, so in per-year mode setting the keyword alone does nothing.
+       Measured, before this existed: a Year-1 growth axis swept from 50% to 90%
+       returned $194.91 at every single step, and rendered seven identical columns
+       without complaint.
+    2. In taper mode those keywords are the taper's *endpoints*, so moving Year 1
+       drags years 2-4 with it. The same question ("what if next year came in at
+       50%?") then gets two different answers -- $118.72 in taper mode against
+       $161.38 in per-year mode -- depending only on which radio is selected.
+
+    Materialising the five rates and replacing one makes the axis a clean
+    single-variable perturbation that means the same thing in both modes. Note that
+    it is still not a local change: revenue compounds, so lifting Year 1 raises the
+    base every later year builds on.
+    """
+    out = dict(assumptions)
+    explicit = out.get("growth_rates")
+    if explicit is None:
+        explicit = [
+            _years_1_to_5(out.get("year_1_growth", DEFAULT_YEAR_1_GROWTH),
+                          out.get("year_5_growth", DEFAULT_YEAR_5_GROWTH),
+                          None, year)
+            for year in range(1, 6)
+        ]
+    rates = list(explicit[:5])
+    rates[index] = _clean(growth)
+    out["growth_rates"] = rates
+    # the list wins; drop the dead keywords so nothing reads a stale endpoint
+    out.pop("year_1_growth", None)
+    out.pop("year_5_growth", None)
+    return out
+
+
 def _apply_axis(assumptions: dict, param: str, value: float) -> dict:
     """Put one axis value into the assumptions, however that parameter is set."""
     if param == "year_5_margin":
         return apply_year_5_margin(assumptions, value)
+    if param in _GROWTH_YEAR_INDEX:
+        return apply_growth_year(assumptions, _GROWTH_YEAR_INDEX[param], value)
     return {**assumptions, param: value}
 
 
@@ -544,6 +593,18 @@ MIN_CREDIBLE_WACC = round(RISK_FREE + EQUITY_RISK_PREMIUM, 4)
 # own growth rate as demanding.
 GLOBAL_SEMI_REVENUE = 1900.0
 
+# Year 1 is the one forecast year that is mostly already known, so it gets a tighter
+# test than the industry ceiling above. Ex 2: Q1 FY2027 is banked and Q2 is guided, so
+# $172.6B of FY2027 revenue is committed before any forecasting starts. A required
+# Year-1 figure implies an H2, and an H2 that needs a quarterly run-rate far above the
+# guided Q2 is arithmetic rather than reasonable disagreement.
+Q1_FY2027_ACTUAL = 81.615        # Ex 2, reported
+Q2_FY2027_GUIDANCE = 91.0        # Ex 2, guided +/-2%
+#: Consensus itself implies 1.21x the guided Q2 in each of H2's quarters, and the bull
+#: case 1.37x. 1.5x therefore sits just above the most aggressive view the exhibits
+#: support, which is where "demanding" should start.
+MAX_H2_RUN_RATE_MULTIPLE = 1.5
+
 IMPOSSIBLE, DEMANDING, DEFENSIBLE = "impossible", "demanding", "defensible"
 
 # Mass thresholds for the probability reading. Deliberately wider than the mean's
@@ -658,6 +719,21 @@ def _judge(key: str, required: float, assumptions: dict) -> tuple[str, str]:
             "a discount rate this low is hard to defend given NVIDIA's customer "
             "concentration"
         )
+    if key == "year_1_growth":
+        # Judge Year 1 against the half-year that is already committed, not against
+        # the final year: moving Year 1 alone barely shifts the final year, so the
+        # industry ceiling below waves through a required Year-1 figure that would
+        # need H2 to run at more than twice the guided Q2.
+        year_one = run_dcf(**_apply_axis(assumptions, key, required)).rows[0].revenue
+        committed = Q1_FY2027_ACTUAL + Q2_FY2027_GUIDANCE
+        implied_quarter = (year_one - committed) / 2
+        if implied_quarter > Q2_FY2027_GUIDANCE * MAX_H2_RUN_RATE_MULTIPLE:
+            return DEMANDING, (
+                f"implies ${year_one:,.0f}B of Year-1 revenue against ${committed:,.0f}B "
+                f"already banked or guided for the first half, i.e. "
+                f"${implied_quarter:,.0f}B in each of the last two quarters against a "
+                f"guided ${Q2_FY2027_GUIDANCE:,.0f}B"
+            )
     if key in ("year_1_growth", "year_5_growth"):
         implied = run_dcf(**_apply_axis(assumptions, key, required)).rows[-1].revenue
         if implied > GLOBAL_SEMI_REVENUE:
