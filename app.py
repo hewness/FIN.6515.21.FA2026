@@ -429,13 +429,16 @@ div.tab-wrapper.tab-wrapper { height: auto; padding-bottom: 0; }
 /* the 1px hairline the trough replaces */
 .tab-container[role="tablist"][role="tablist"]::after { display: none; }
 
+/* Sized to fit six tabs rather than to look roomy. Gradio measures the strip and
+   moves whatever does not fit into a `>>` overflow menu, so every pixel of padding
+   here is a tab that can disappear. The pill treatment survives the trim. */
 .tab-container[role="tablist"] [role="tab"] {
   height: auto;
-  padding: 7px 14px;
+  padding: 6px 11px;
   border: 1px solid transparent;
   border-radius: 7px;
   font-weight: 600;
-  font-size: 0.88rem;
+  font-size: 0.84rem;
   letter-spacing: .005em;
   color: var(--body-text-color-subdued);
   transition: background-color .15s ease-out, color .15s ease-out;
@@ -464,9 +467,11 @@ div.tab-wrapper.tab-wrapper { height: auto; padding-bottom: 0; }
   background: transparent;
   padding: 2px 0;
 }
+/* Nested strips sit inside a case tab's own right-hand column, so they have roughly
+   a third of the page to work with -- the tightest place the six views have to fit. */
 [role="tabpanel"] .tab-container[role="tablist"] [role="tab"] {
-  padding: 5px 11px;
-  font-size: 0.82rem;
+  padding: 4px 9px;
+  font-size: 0.78rem;
 }
 [role="tabpanel"] .tab-container[role="tablist"] [role="tab"].selected {
   background: var(--background-fill-secondary);
@@ -852,21 +857,21 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                     "subtracts, grey is a running total** &mdash; the same meaning "
                     "those colours carry in the sensitivity grid."
                 )
-            with gr.Tab("Sensitivity - WACC vs. Terminal Growth"):
+            with gr.Tab("WACC vs. Terminal Growth"):
                 grid_wacc = gr.HTML()
                 gr.Markdown(
                     "Each cell revalues the company at that WACC and terminal growth "
                     "rate, holding every other assumption fixed. Blue is worth more "
                     "than the market price, red is worth less."
                 )
-            with gr.Tab("Sensitivity - Operating Margin vs. Terminal Growth"):
+            with gr.Tab("Operating Margin vs. Terminal Growth"):
                 grid_margin = gr.HTML()
                 gr.Markdown(
                     "The same grid against margin instead of discount rate. The column "
                     "axis is the **Year-5 operating margin** &mdash; the level that "
                     "holds flat from Year 5 into perpetuity."
                 )
-            with gr.Tab("Sensitivity - WACC vs. Revenue Growth"):
+            with gr.Tab("WACC vs. Revenue Growth"):
                 grid_growth = gr.HTML()
                 gr.Markdown(
                     "Near-term growth against the discount rate, where the other two "
@@ -930,9 +935,9 @@ with gr.Blocks(title="NVIDIA DCF Valuation") as demo:
                     ("Valuation", "valuation"),
                     ("Projection", "projection"),
                     ("Valuation Waterfall", "waterfall"),
-                    ("Sensitivity - WACC vs. Terminal Growth", "sens_wacc"),
-                    ("Sensitivity - Operating Margin vs. Terminal Growth", "sens_margin"),
-                    ("Sensitivity - WACC vs. Revenue Growth", "sens_growth"),
+                    ("WACC vs. Terminal Growth", "sens_wacc"),
+                    ("Operating Margin vs. Terminal Growth", "sens_margin"),
+                    ("WACC vs. Revenue Growth", "sens_growth"),
                 ]:
                     with gr.Tab(label, id=tab_id):
                         single_views.append(gr.HTML())

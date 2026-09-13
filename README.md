@@ -52,7 +52,7 @@ math and every chart are hand-rolled, so there is no numpy, pandas or plotly to 
 .venv\Scripts\python.exe -m pytest
 ```
 
-146 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
+149 tests. `test_dcf.py` covers the valuation math — including a case simple enough to
 verify by hand, the cash/debt bridge, both growth/margin schedules, the free cash flow
 drivers, the terminal-value guardrail, and the full discounting chain: that terminal
 value really is Gordon Growth, that each year's present value is its cash flow times its
@@ -218,12 +218,12 @@ pushed the total up would be a lie. And that bar is only ~2% of equity value, so
 sliver — deliberately, because that thinness is true information. No broken axis, no
 second scale; the value label carries it.
 
-The **Sensitivity - WACC vs. Terminal Growth** tab revalues the company across a grid of
+The **WACC vs. Terminal Growth** tab revalues the company across a grid of
 WACC (8–14%) and terminal
 growth (1–5%) rates, holding your other slider settings fixed. Blue cells are worth more
 than the market price, red less, with a neutral midpoint at fair value.
 
-The **Sensitivity - WACC vs. Revenue Growth** tab covers the near term, where the other
+The **WACC vs. Revenue Growth** tab covers the near term, where the other
 two both vary terminal assumptions. Its row axis is **Year-1 revenue growth**, spanning
 50-110% so it brackets the three anchors the cases are built on: the ~64% floor Q2
 guidance already puts under the year, the 82.25% consensus, and the 95% bull. Columns are
@@ -234,7 +234,7 @@ local change, because revenue compounds: a higher Year 1 raises the base every l
 builds on. It does mean the axis asks one clean question, and asks the same one whether
 the panel is in taper or per-year mode.
 
-The **Sensitivity - Operating Margin vs. Terminal Growth** tab is the same grid against
+The **Operating Margin vs. Terminal Growth** tab is the same grid against
 margin instead of discount rate. Its column axis is the **Year-5 operating margin** —
 the level that holds flat from Year 5 into perpetuity — so both of its axes govern the
 terminal economics. Year-1 margin stays wherever you set it, and the rows match the

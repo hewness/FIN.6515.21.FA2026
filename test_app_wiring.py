@@ -821,3 +821,65 @@ def test_nested_case_tabs_stay_subordinate_to_the_outer_strip():
     assert nested, "nested tabs are not distinguished from the outer strip"
     # the nested strip drops the trough that the outer one draws
     assert any("transparent" in b for _, b in nested)
+
+
+# --- tab labels ----------------------------------------------------------------
+#
+# Gradio measures the tab strip and moves whatever does not fit into a ">>" overflow
+# menu, so a long label does not wrap or truncate -- it hides a whole view behind a
+# dropdown. These guards keep the six views reachable without one.
+
+import gradio as gr  # noqa: E402
+
+
+def _tab_labels(tabs):
+    return [c.label for c in tabs.children if isinstance(c, gr.TabItem)]
+
+
+def _nested_tabs(node):
+    for child in getattr(node, "children", []):
+        if isinstance(child, gr.Tabs):
+            return child
+        found = _nested_tabs(child)
+        if found is not None:
+            return found
+    return None
+
+
+def test_the_two_tab_structures_carry_identical_labels():
+    """The single-model strip and the per-case strips are built separately.
+
+    One is an inline loop over (label, id) pairs, the other is `view_tabs()`. Adding a
+    view to one and not the other leaves the case tabs silently short of a panel, and
+    nothing else in the suite would notice.
+    """
+    single = _tab_labels(app.single_model_tabs)
+    assert len(single) == 6
+    for case in ("Base", "Bear", "Bull"):
+        tab = [c for c in app.scenario_model_tabs.children
+               if isinstance(c, gr.TabItem) and c.label == case][0]
+        nested = _nested_tabs(tab)
+        assert nested is not None, case
+        assert _tab_labels(nested) == single, case
+
+
+def test_view_labels_are_short_enough_to_stay_out_of_the_overflow_menu():
+    """A budget, not a limit on any single name.
+
+    Six views at these labels come to roughly 1,000px of strip, which fits from about
+    a 1,700px window upward. The old "Sensitivity - " prefixes cost ~380px on their
+    own and pushed the strip past 1,380px. This keeps a new tab from quietly
+    reintroducing that.
+    """
+    labels = _tab_labels(app.single_model_tabs)
+    assert "Sensitivity - " not in " ".join(labels)
+    total = sum(len(label) for label in labels)
+    assert total <= 130, (
+        f"tab labels total {total} characters; past ~130 the strip needs a window "
+        f"wider than most laptops or Gradio hides views behind a '>>' menu"
+    )
+    assert max(len(label) for label in labels) <= 40
+
+
+def test_scenario_mode_tabs_lead_with_scenarios():
+    assert _tab_labels(app.scenario_model_tabs) == ["Scenarios", "Base", "Bear", "Bull"]
